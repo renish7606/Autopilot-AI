@@ -2,9 +2,11 @@
 
 from pathlib import Path
 import os
+import hashlib
 
 from .contracts import ToolResult, Verification
 from .tools import independently_list_names
+from .browser import open_webpage
 
 
 def verify_directory_listing(result: ToolResult, directory: Path) -> Verification:
@@ -115,3 +117,49 @@ def verify_file_search(
             "entries_rechecked": min(visited, 100_000),
         },
     )
+
+
+def verify_created_directory(result: ToolResult, destination: Path) -> Verification:
+    exists = destination.is_dir() and not destination.is_symlink()
+    output_matches = result.output.get("path") == str(destination) and result.output.get("created") is True
+    passed = result.status == "success" and exists and output_matches
+    return Verification(passed=passed, summary="Created directory independently verified." if passed else "Created directory could not be verified.", evidence={"path": str(destination), "is_directory": exists, "tool_output_matches": output_matches})
+
+
+def verify_copied_file(result: ToolResult, source: Path, destination: Path) -> Verification:
+    if result.status != "success" or not destination.is_file() or destination.is_symlink():
+        return Verification(passed=False, summary="Copied file is missing or the tool failed.", evidence={"destination": str(destination), "exists": destination.is_file()})
+    def file_digest(path: Path) -> tuple[int, str]:
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+        return size, digest.hexdigest()
+    try:
+        source_size, source_hash = file_digest(source)
+        dest_size, dest_hash = file_digest(destination)
+    except OSError as exc:
+        return Verification(passed=False, summary="Could not independently read the source and copied file.", evidence={"error": str(exc)})
+    output_matches = (result.output.get("source") == str(source) and result.output.get("destination") == str(destination)
+                      and result.output.get("size_bytes") == dest_size and result.output.get("sha256") == dest_hash)
+    passed = source_size == dest_size and source_hash == dest_hash and output_matches
+    return Verification(passed=passed, summary="Copied file content independently verified by SHA-256." if passed else "Copied file differs from source or tool output.", evidence={"source_size_bytes": source_size, "destination_size_bytes": dest_size, "source_sha256": source_hash, "destination_sha256": dest_hash, "tool_output_matches": output_matches})
+
+
+def verify_webpage_open(result: ToolResult, requested_url: str) -> Verification:
+    if result.status != "success":
+        return Verification(passed=False, summary="Browser navigation did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})
+    observed = result.output
+    required = (isinstance(observed.get("url"), str), isinstance(observed.get("title"), str), isinstance(observed.get("text"), str), isinstance(observed.get("http_status"), int))
+    if not all(required) or not 200 <= observed.get("http_status", 0) < 400:
+        return Verification(passed=False, summary="Browser output did not contain a valid successful page response.")
+    try:
+        fresh = open_webpage(requested_url)
+    except Exception as exc:
+        return Verification(passed=False, summary="A fresh browser load could not independently verify the page.", evidence={"error": str(exc)})
+    same_url = fresh["url"].rstrip("/").casefold() == observed["url"].rstrip("/").casefold()
+    same_title = fresh["title"] == observed["title"]
+    passed = 200 <= fresh["http_status"] < 400 and same_url and same_title
+    return Verification(passed=passed, summary="Page load independently verified in a fresh browser context." if passed else "A fresh page load differed from the original navigation.", evidence={"first_url": observed["url"], "fresh_url": fresh["url"], "first_title": observed["title"], "fresh_title": fresh["title"], "fresh_http_status": fresh["http_status"], "url_matches": same_url, "title_matches": same_title})

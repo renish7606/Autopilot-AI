@@ -17,6 +17,14 @@ class PlanStep(BaseModel):
     requires_approval: bool = False
 
 
+class TaskPlan(BaseModel):
+    """A short, ordered plan whose steps are validated independently."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[PlanStep] = Field(min_length=1, max_length=3)
+
+
 class ToolResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

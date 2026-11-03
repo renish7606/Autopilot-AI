@@ -2,10 +2,12 @@
 
 from pathlib import Path
 import os
+import hashlib
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .browser import BrowserPolicyError, BrowserToolError, OpenWebpageArgs, open_webpage
 from .contracts import ToolResult
 from .policy import PathPolicy
 
@@ -23,6 +25,48 @@ class SearchFilesArgs(BaseModel):
     query: str = Field(min_length=1, max_length=200)
     match_mode: Literal["exact", "contains"] = "exact"
     max_results: int = Field(default=100, ge=1, le=500)
+
+
+class CreateDirectoryArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=300)
+
+
+class CopyFileArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_path: str = Field(min_length=1, max_length=300)
+    destination_path: str = Field(min_length=1, max_length=300)
+    source_root_index: int = Field(default=0, ge=0)
+
+
+def _create_directory(policy: PathPolicy, path: str) -> dict[str, Any]:
+    destination = policy.resolve_new_path(path)
+    destination.mkdir()
+    return {"path": str(destination), "created": destination.is_dir()}
+
+
+def _copy_file(policy: PathPolicy, source_path: str, destination_path: str, source_root_index: int) -> dict[str, Any]:
+    source = policy.resolve_path(source_path, source_root_index)
+    if not source.is_file():
+        raise ToolError("The source must be an existing regular file.")
+    destination = policy.resolve_new_path(destination_path)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with source.open("rb") as source_stream, destination.open("xb") as destination_stream:
+            while chunk := source_stream.read(1024 * 1024):
+                destination_stream.write(chunk)
+                digest.update(chunk)
+                size += len(chunk)
+    except OSError as exc:
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ToolError(f"Could not copy file: {exc}") from exc
+    return {"source": str(source), "destination": str(destination), "size_bytes": size, "sha256": digest.hexdigest()}
 
 
 class ToolError(ValueError):
@@ -123,6 +167,9 @@ class ToolRegistry:
         self._tools: dict[str, tuple[type[BaseModel], Callable[..., dict[str, Any]]]] = {
             "list_directory": (ListDirectoryArgs, _list_directory),
             "search_files": (SearchFilesArgs, _search_files),
+            "create_directory": (CreateDirectoryArgs, _create_directory),
+            "copy_file": (CopyFileArgs, _copy_file),
+            "open_webpage": (OpenWebpageArgs, lambda policy, url: open_webpage(url)),
         }
 
     @property
@@ -140,6 +187,10 @@ class ToolRegistry:
             return ToolResult(status="success", output=output)
         except ValidationError as exc:
             return ToolResult(status="denied", error_code="invalid_arguments", output={"detail": exc.errors(include_url=False)})
+        except BrowserPolicyError as exc:
+            return ToolResult(status="denied", error_code="browser_policy_denied", output={"detail": str(exc)})
+        except BrowserToolError as exc:
+            return ToolResult(status="error", error_code="browser_error", output={"detail": str(exc)})
         except (ToolError, ValueError, OSError) as exc:
             return ToolResult(status="denied", error_code="policy_or_tool_error", output={"detail": str(exc)})
 

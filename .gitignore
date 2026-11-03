@@ -7,3 +7,5 @@ logs/
 workspace/*
 !workspace/.gitkeep
 down/models/
+down/pip-cache/
+down/playwright-browsers/

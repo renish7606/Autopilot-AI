@@ -7,8 +7,8 @@ import pytest
 
 from autopilot_ai.approved_dirs import add_approved_dirs, clear_approved_dirs, load_approved_dirs, remove_approved_dirs
 from autopilot_ai.agent import run_goal
-from autopilot_ai.contracts import PlanStep
-from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_with_ollama
+from autopilot_ai.contracts import PlanStep, TaskPlan
+from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
 from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.tools import ToolRegistry
 
@@ -35,6 +35,110 @@ def test_natural_language_search_is_recursive_and_verified(tmp_path: Path) -> No
     assert report["tool_result"]["output"]["matches"] == [str((nested / "Budget-Q4.xlsx").resolve())]
     assert report["verification"]["passed"] is True
     assert report["verification"]["evidence"]["fresh_matches"] == [str((nested / "Budget-Q4.xlsx").resolve())]
+
+
+def test_bounded_multi_action_plan_verifies_each_step(tmp_path: Path) -> None:
+    (tmp_path / "report.pdf").write_bytes(b"pdf")
+
+    report = run_goal("Show me the files and then find report.pdf", tmp_path)
+
+    assert report["status"] == "completed"
+    assert report["planner"] == "heuristic"
+    assert [item["plan"]["tool_name"] for item in report["steps"]] == ["list_directory", "search_files"]
+    assert all(item["verification"]["passed"] for item in report["steps"])
+    assert report["steps"][1]["tool_result"]["output"]["matches"] == [str((tmp_path / "report.pdf").resolve())]
+
+
+def test_multi_action_ollama_plan_is_used_when_it_matches_intent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "report.pdf").write_bytes(b"pdf")
+    expected = plan_goal_steps("Show files and find report.pdf")
+    monkeypatch.setattr("autopilot_ai.agent.plan_with_ollama_steps", lambda goal, tools: expected)
+
+    report = run_goal("Show files and find report.pdf", tmp_path, planner="ollama")
+
+    assert report["status"] == "completed"
+    assert report["planner"] == "ollama"
+    assert len(report["steps"]) == 2
+
+
+def test_multi_action_ollama_mismatch_uses_deterministic_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "report.pdf").write_bytes(b"pdf")
+    wrong = plan_goal_steps("Show files and find other.pdf")
+    monkeypatch.setattr("autopilot_ai.agent.plan_with_ollama_steps", lambda goal, tools: wrong)
+
+    report = run_goal("Show files and find report.pdf", tmp_path, planner="ollama")
+
+    assert report["status"] == "completed"
+    assert report["planner"] == "heuristic_fallback"
+    assert report["steps"][1]["plan"]["arguments"]["query"] == "report.pdf"
+
+
+def test_multi_action_plan_is_bounded_to_three_steps(tmp_path: Path) -> None:
+    report = run_goal("Show files and find a.pdf and list files and find b.pdf", tmp_path)
+    assert report["status"] == "unsupported"
+
+
+def test_create_directory_requires_approval_then_verifies(tmp_path: Path) -> None:
+    preview = run_goal("Create folder reports", tmp_path)
+    assert preview["status"] == "approval_required"
+    assert preview["plan"]["requires_approval"] is True
+    assert not (tmp_path / "reports").exists()
+
+    approved = run_goal("Create folder reports", tmp_path, approved=True)
+    assert approved["status"] == "completed"
+    assert approved["verification"]["passed"] is True
+    assert (tmp_path / "reports").is_dir()
+
+
+def test_copy_file_requires_approval_and_verifies_digest(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"copy me\x00\xff")
+
+    preview = run_goal("Copy file source.txt to copy.txt", tmp_path)
+    assert preview["status"] == "approval_required"
+    assert not (tmp_path / "copy.txt").exists()
+
+    approved = run_goal("Copy file source.txt to copy.txt", tmp_path, approved=True)
+    assert approved["status"] == "completed"
+    assert approved["verification"]["passed"] is True
+    assert (tmp_path / "copy.txt").read_bytes() == source.read_bytes()
+
+
+def test_copy_file_refuses_overwrite_and_path_escape(tmp_path: Path) -> None:
+    (tmp_path / "source.txt").write_text("source", encoding="utf-8")
+    (tmp_path / "existing.txt").write_text("keep", encoding="utf-8")
+    registry = ToolRegistry(PathPolicy(tmp_path))
+
+    overwrite = registry.execute("copy_file", {"source_path": "source.txt", "destination_path": "existing.txt"})
+    escape = registry.execute("create_directory", {"path": "../outside"})
+
+    assert overwrite.status == "denied"
+    assert escape.status == "denied"
+    assert (tmp_path / "existing.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_public_webpage_request_runs_and_is_freshly_verified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    page_result = {"requested_url": "https://example.com/", "url": "https://example.com/", "http_status": 200, "title": "Example Domain", "text": "Example page", "text_truncated": False}
+    monkeypatch.setattr("autopilot_ai.tools.open_webpage", lambda url: page_result)
+    monkeypatch.setattr("autopilot_ai.verifier.open_webpage", lambda url: page_result)
+
+    report = run_goal("Open https://example.com/", tmp_path)
+
+    assert report["status"] == "completed"
+    assert report["plan"]["tool_name"] == "open_webpage"
+    assert report["planner"] == "heuristic"
+    assert report["verification"]["passed"] is True
+    assert report["verification"]["evidence"]["fresh_http_status"] == 200
+
+
+def test_browser_tool_rejects_local_and_non_http_urls(tmp_path: Path) -> None:
+    registry = ToolRegistry(PathPolicy(tmp_path))
+
+    local = registry.execute("open_webpage", {"url": "http://127.0.0.1:11434/api/tags"})
+    file_url = registry.execute("open_webpage", {"url": "file:///C:/Users/ASUS/secret.txt"})
+
+    assert local.status == "denied"
+    assert file_url.status == "denied"
 
 
 def test_exact_filename_search_spans_all_approved_roots(tmp_path: Path) -> None:
@@ -167,7 +271,8 @@ def test_ollama_planner_returns_validated_registered_tool(monkeypatch: pytest.Mo
         def read(self) -> bytes:
             import json
 
-            return json.dumps({"message": {"content": step.model_dump_json()}}).encode()
+            task_plan = TaskPlan(steps=[step])
+            return json.dumps({"message": {"content": task_plan.model_dump_json()}}).encode()
 
     def fake_urlopen(request: object, timeout: float) -> FakeResponse:
         assert timeout == 90
@@ -203,11 +308,35 @@ def test_ollama_planner_rejects_unregistered_tool(monkeypatch: pytest.MonkeyPatc
         def read(self) -> bytes:
             import json
 
-            return json.dumps({"message": {"content": step.model_dump_json()}}).encode()
+            task_plan = TaskPlan(steps=[step])
+            return json.dumps({"message": {"content": task_plan.model_dump_json()}}).encode()
 
     monkeypatch.setattr("autopilot_ai.planner.urlopen", lambda request, timeout: FakeResponse())
-    with pytest.raises(ModelPlannerError, match="unavailable tool"):
+    with pytest.raises(ModelPlannerError, match="unavailable"):
         plan_with_ollama("Run a command", ("list_directory",))
+
+
+def test_ollama_structured_plan_accepts_two_safe_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+    plan = TaskPlan(steps=[
+        PlanStep(step_id="first", description="list", tool_name="list_directory", arguments={"path": "."}, expected_result="ignored"),
+        PlanStep(step_id="second", description="search", tool_name="search_files", arguments={"path": ".", "query": "report.pdf", "match_mode": "exact", "max_results": 100}, expected_result="ignored"),
+    ])
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"message": {"content": plan.model_dump_json()}}).encode()
+
+    monkeypatch.setattr("autopilot_ai.planner.urlopen", lambda request, timeout: FakeResponse())
+    steps = plan_with_ollama_steps("Show files and find report.pdf", ("list_directory", "search_files"))
+
+    assert [step.tool_name for step in steps] == ["list_directory", "search_files"]
+    assert [step.step_id for step in steps] == ["step-1", "step-2"]
 
 
 def test_ollama_http_error_includes_server_response(monkeypatch: pytest.MonkeyPatch) -> None:
