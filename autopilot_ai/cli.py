@@ -31,6 +31,7 @@ def main() -> None:
     parser.add_argument("--clear-approved-dirs", action="store_true", help="Clear the persistent search allowlist.")
     parser.add_argument("--planner", choices=("ollama", "heuristic"), default="ollama", help="Use local Ollama (default) or the deterministic starter planner")
     parser.add_argument("--approve", action="store_true", help="Explicitly approve the planned filesystem change (create/copy).")
+    parser.add_argument("--debug", action="store_true", help="Print the full structured JSON report, including plans and verification evidence.")
     parser.add_argument("--delay-seconds", type=int, choices=range(0, 31), default=0, help="Wait up to 30 seconds before desktop inspection so you can switch to the app to inspect.")
     args = parser.parse_args()
 
@@ -64,9 +65,119 @@ def main() -> None:
     except ApprovedDirectoryError as exc:
         print(json.dumps({"status": "error", "message": str(exc)}, indent=2))
         raise SystemExit(1) from exc
-    print(json.dumps(report, indent=2, ensure_ascii=True))
+    print(json.dumps(report, indent=2, ensure_ascii=True) if args.debug else format_report(report))
     if report["status"] not in ("completed", "approval_required"):
         raise SystemExit(1)
+
+
+def format_report(report: dict) -> str:
+    """Render a concise human-readable result; use --debug for full JSON."""
+    labels = {
+        "completed": "Completed",
+        "approval_required": "Approval required",
+        "clarification_required": "Clarification required",
+        "failed": "Failed",
+        "partially_completed": "Partially completed",
+        "unsupported": "Unsupported",
+        "denied": "Denied",
+        "error": "Failed",
+    }
+    lines = [f"Task: {report.get('goal', 'AutoPilot task')}", f"Status: {labels.get(report.get('status'), 'Failed')}"]
+    steps = report.get("steps")
+    reports = steps if isinstance(steps, list) else ([report] if report.get("plan") else [])
+    if reports:
+        executed = any(item.get("tool_result", {}).get("status") == "success" for item in reports)
+        attempted = any("tool_result" in item for item in reports)
+        heading = "What was performed:" if executed else ("Attempted operation:" if attempted else "Planned operation:")
+        lines.append(heading)
+        for item in reports:
+            plan = item.get("plan", {})
+            result = item.get("tool_result", {})
+            output = result.get("output", {})
+            lines.append(f"- {plan.get('description', plan.get('tool_name', 'Operation'))}")
+            if plan.get("tool_name") == "list_directory":
+                items = output.get("items", [])
+                visible_items = [item for item in items if isinstance(item, dict)]
+                lines.append(f"  Found {len(visible_items)} item(s).")
+                for entry in visible_items[:50]:
+                    lines.append(f"  {entry.get('name', '')} ({entry.get('type', 'unknown')})")
+                if len(visible_items) > 50:
+                    lines.append(f"  ...and {len(visible_items) - 50} more item(s). Use --debug for the full listing.")
+            elif plan.get("tool_name") == "search_files":
+                matches = output.get("matches", [])
+                lines.append(f"  Found {len(matches)} matching file(s).")
+                lines.extend(f"  {match}" for match in matches)
+                if output.get("complete") is False:
+                    lines.append("  Warning: the search was incomplete; inspect the errors before relying on these results.")
+                    for error in output.get("errors", [])[:3]:
+                        lines.append(f"  Search warning: {error}")
+                    if len(output.get("errors", [])) > 3:
+                        lines.append(f"  ...and {len(output['errors']) - 3} more search warning(s). Use --debug for the full report.")
+            elif plan.get("tool_name") == "create_directory":
+                lines.append(f"  Directory: {output.get('path', '(not available)')}")
+            elif plan.get("tool_name") == "copy_file":
+                lines.append(f"  Copied to: {output.get('destination', '(not available)')}")
+                lines.append(f"  Size: {output.get('size_bytes', 'unknown')} bytes")
+            elif plan.get("tool_name") == "open_webpage":
+                if result.get("status") == "success":
+                    lines.append(f"  Page: {output.get('title', '(untitled)')} — {output.get('url', '')}")
+                    if output.get("text"):
+                        lines.append(f"  Visible text: {output['text'][:500]}")
+            elif plan.get("tool_name") == "inspect_active_window":
+                if output.get("backend") == "uia":
+                    lines.append(f"  Window: {output.get('window_title', '(untitled)')}; {output.get('controls_returned', 0)} controls read.")
+                    controls = output.get("controls", [])
+                    named_controls = [
+                        f"{control.get('name') or '(unnamed)'} [{control.get('control_type') or 'control'}]"
+                        for control in controls[:20]
+                        if isinstance(control, dict)
+                    ]
+                    if named_controls:
+                        lines.append("  Visible controls:")
+                        lines.extend(f"  - {name}" for name in named_controls)
+                    if output.get("controls_truncated"):
+                        lines.append("  More controls were available; use --debug for the complete structured result.")
+                else:
+                    lines.append(f"  Active-window screenshot saved to: {output.get('screenshot_path', '(not available)')}")
+            verification = item.get("verification", {})
+            if verification:
+                label = "passed" if verification.get("passed") else "failed"
+                lines.append(f"  Verification: {label}. {verification.get('summary', '')}".rstrip())
+            if result.get("status") != "success":
+                detail = output.get("detail", result.get("error_code", "Operation failed."))
+                lines.append(f"  Error: {detail}")
+            if output.get("warning"):
+                lines.append(f"  Warning: {output['warning']}")
+    elif report.get("message"):
+        lines.append(str(report["message"]))
+    if reports and report.get("message"):
+        lines.append(f"Details: {report['message']}")
+    for issue in report.get("argument_errors", []):
+        if isinstance(issue, dict):
+            location = ".".join(str(part) for part in issue.get("loc", ()))
+            detail = issue.get("msg", "Invalid value")
+            location_text = f" at {location}" if location else ""
+            lines.append(f"Argument error{location_text}: {detail}")
+    if report.get("planner_note"):
+        lines.append("Note: the local model plan was unavailable or did not match the request, so AutoPilot used its validated deterministic interpretation.")
+    status = report.get("status")
+    if status == "approval_required":
+        lines.append("Next: review the planned change, then rerun the same task with --approve.")
+    elif status == "clarification_required":
+        lines.append(f"Question: {report.get('question', 'Please clarify the request.')}")
+    elif status == "unsupported":
+        lines.append("Next: use a supported request or wait for that capability to be implemented.")
+    elif status == "partially_completed":
+        lines.append("Next: review the completed step evidence and resolve the failed step before continuing.")
+    elif status in {"failed", "denied", "error"} and any(
+        item.get("plan", {}).get("tool_name") == "open_webpage"
+        and item.get("tool_result", {}).get("error_code") == "browser_error"
+        for item in reports
+    ):
+        lines.append("Next: try a public page that allows automated reading, or open this site manually in your regular browser. AutoPilot does not use your signed-in browser session.")
+    elif status in {"failed", "denied", "error"}:
+        lines.append("Next: review the error above; no success is claimed for the failed operation.")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

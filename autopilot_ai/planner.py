@@ -1,4 +1,4 @@
-"""Bounded planners for the first supported natural-language task."""
+"""Bounded deterministic and local-model planners for approved tool calls."""
 
 import json
 import os
@@ -11,6 +11,12 @@ from .contracts import PlanStep, TaskPlan
 
 class PlanningError(ValueError):
     pass
+
+
+class ClarificationRequired(PlanningError):
+    def __init__(self, question: str) -> None:
+        super().__init__(question)
+        self.question = question
 
 
 class ModelPlannerError(RuntimeError):
@@ -26,26 +32,42 @@ def plan_goal(goal: str) -> PlanStep:
     normalized = " ".join(goal.casefold().replace("_", " ").split())
     if any(phrase in normalized for phrase in ("inspect active window", "inspect the active window", "inspect screen", "what is on screen", "what's on screen", "what is on my screen", "what's on my screen", "read active window")):
         return PlanStep(step_id="step-1", description="Inspect the active desktop window using Windows UI Automation.", tool_name="inspect_active_window", arguments={"max_controls": 60, "screenshot_fallback": True}, expected_result="A fresh UI Automation read or a saved screenshot confirms the active window state.", risk_level="low", requires_approval=False)
-    browser_match = re.fullmatch(r"(?:please\s+)?(?:open|visit|browse to|go to)\s+(https?://\S+)", goal.strip(), flags=re.IGNORECASE)
+    browser_match = re.fullmatch(
+        r"(?:please\s+)?(?:open(?:\s+(?:(?:the\s+)?(?:webpage|website|site)))?|visit|browse(?:\s+to)?|go to)\s+(https?://\S+)",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    )
     if browser_match:
         url = browser_match.group(1).rstrip(".,;!?)]\"'")
         return PlanStep(step_id="step-1", description="Open a public web page and read its visible text.", tool_name="open_webpage", arguments={"url": url}, expected_result="A fresh browser page load returns an HTTP response and visible page content.", risk_level="low", requires_approval=False)
-    create_match = re.fullmatch(r"(?:please\s+)?create\s+(?:a\s+)?(?:folder|directory)(?:\s+named)?\s+(.+)", goal.strip(), flags=re.IGNORECASE)
+    create_match = re.fullmatch(
+        r"(?:please\s+)?(?:create|make)\s+(?:me\s+)?(?:a\s+)?(?:new\s+)?(?:folder|directory)(?:\s+(?:named|called))?\s+(.+)",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    )
     if create_match:
         path = create_match.group(1).strip().strip("\"'")
         return PlanStep(step_id="step-1", description="Create a new directory inside the primary approved workspace.", tool_name="create_directory", arguments={"path": path}, expected_result="The new directory exists at the requested workspace path.", risk_level="medium", requires_approval=True)
-    copy_match = re.fullmatch(r"(?:please\s+)?copy\s+(?:file\s+)?(.+?)\s+to\s+(.+)", goal.strip(), flags=re.IGNORECASE)
+    if re.fullmatch(
+        r"(?:please\s+)?(?:create|make)\s+(?:me\s+)?(?:a\s+)?(?:new\s+)?(?:folder|directory)(?:\s+(?:named|called))?",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    ):
+        raise ClarificationRequired("What name should I use for the new folder?")
+    copy_match = re.fullmatch(r"(?:please\s+)?(?:copy|duplicate)\s+(?:(?:the\s+)?file\s+)?(.+?)\s+(?:to|as)\s+(.+)", goal.strip(), flags=re.IGNORECASE)
     if copy_match:
         source = copy_match.group(1).strip().strip("\"'")
         destination = copy_match.group(2).strip().strip("\"'")
         return PlanStep(step_id="step-1", description="Copy a file within approved directories without overwriting an existing destination.", tool_name="copy_file", arguments={"source_path": source, "destination_path": destination}, expected_result="The copied file has the same size and SHA-256 digest as its source.", risk_level="medium", requires_approval=True)
+    if normalized.startswith(("copy ", "duplicate ")):
+        raise ClarificationRequired("Which source file should I copy, and what destination path should I use?")
     raw_filename = goal.strip().strip(" \t\r\n\"'")
     basename = re.split(r"[\\/]", raw_filename)[-1]
     filename_with_extension = bool(re.fullmatch(r"[^<>:\"|?*]+\.[A-Za-z0-9]{1,16}", basename))
     hidden_filename = bool(re.fullmatch(r"\.[A-Za-z0-9_.-]+", basename))
     command_prefixes = (
         "show ", "list ", "search ", "find ", "look for ", "locate ", "open ", "read ",
-        "delete ", "move ", "rename ", "copy ", "create ", "run ", "what ", "who ",
+        "delete ", "move ", "rename ", "copy ", "duplicate ", "create ", "make ", "run ", "what ", "who ",
         "why ", "how ", "when ", "where ", "tell me ", "can you ", "could you ", "please ",
     )
     begins_with_command = raw_filename.casefold().startswith(command_prefixes)
@@ -72,8 +94,8 @@ def plan_goal(goal: str) -> PlanStep:
             query = match.group(1).strip() if match else ""
             query = re.split(r"\s+in (?:this|the) (?:workspace|folder|directory)\b", query, flags=re.IGNORECASE)[0]
             query = re.sub(r"[?.!]+$", "", query).strip()
-        if not query:
-            raise PlanningError("Please provide a filename or part of a filename to search for.")
+        if not query or query.casefold().strip(" .!?") in {"file", "files", "a file", "a files", "named", "called", "containing", "with", "for"}:
+            raise ClarificationRequired("What filename or part of a filename should I search for?")
         return PlanStep(
             step_id="step-1",
             description="Search filenames under the approved workspace.",

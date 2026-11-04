@@ -25,6 +25,19 @@ class BrowserPolicyError(BrowserToolError):
     pass
 
 
+def _http_status_error(status: int) -> str:
+    if status in (401, 403):
+        return (
+            f"The website returned HTTP {status} ({'Unauthorized' if status == 401 else 'Forbidden'}). "
+            "It may require sign-in or block automated browser access. AutoPilot uses a fresh, unsigned browser session."
+        )
+    if status == 404:
+        return "The website returned HTTP 404 (Not Found). Check the page address."
+    if status >= 500:
+        return f"The website returned HTTP {status} (server error). Try again later."
+    return f"The page returned HTTP {status}."
+
+
 def _validate_public_url(url: str, dns_cache: dict[str, tuple[str, ...]] | None = None) -> str:
     try:
         parsed = urlsplit(url)
@@ -66,7 +79,12 @@ def open_webpage(url: str) -> dict:
 
     dns_cache: dict[str, tuple[str, ...]] = {}
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, downloads_path=None)
+        try:
+            browser = playwright.chromium.launch(headless=True, downloads_path=None, timeout=10_000)
+        except PlaywrightTimeoutError as exc:
+            raise BrowserToolError("Chromium did not start within 10 seconds.") from exc
+        except PlaywrightError as exc:
+            raise BrowserToolError(f"Could not start Chromium: {exc}") from exc
         try:
             context = browser.new_context(accept_downloads=False, java_script_enabled=True)
             page = context.new_page()
@@ -89,7 +107,7 @@ def open_webpage(url: str) -> dict:
                     raise BrowserToolError("The browser did not receive an HTTP response.")
                 status = response.status
                 if status >= 400:
-                    raise BrowserToolError(f"The page returned HTTP {status}.")
+                    raise BrowserToolError(_http_status_error(status))
                 title = page.title()
                 text = page.locator("body").inner_text(timeout=5_000)
             except PlaywrightTimeoutError as exc:

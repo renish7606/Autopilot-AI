@@ -15,6 +15,11 @@ autopilot = "autopilot_ai.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "integration: exercises real filesystem or browser integrations rather than mocked observations",
+    "ollama_integration: opt-in test using the configured local Ollama model and server",
+    "windows_integration: opt-in test that reads the live Windows foreground window",
+]
 
 [tool.setuptools.packages.find]
 include = ["autopilot_ai*"]

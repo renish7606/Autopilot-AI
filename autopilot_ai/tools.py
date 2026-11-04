@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import hashlib
 from typing import Any, Callable, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -60,25 +61,57 @@ def _copy_file(policy: PathPolicy, source_path: str, destination_path: str, sour
     if not source.is_file():
         raise ToolError("The source must be an existing regular file.")
     destination = policy.resolve_new_path(destination_path)
+    # Stage beside the destination, then use a hard link as an atomic,
+    # no-overwrite publish. Only the uniquely named staging file is cleaned
+    # up on errors, so a file created concurrently at the requested path is
+    # never removed by this operation.
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.autopilot-tmp")
     digest = hashlib.sha256()
     size = 0
+    temporary_created = False
+    cleanup_warning = None
     try:
-        with source.open("rb") as source_stream, destination.open("xb") as destination_stream:
-            while chunk := source_stream.read(1024 * 1024):
-                destination_stream.write(chunk)
-                digest.update(chunk)
-                size += len(chunk)
-    except OSError as exc:
+        with source.open("rb") as source_stream:
+            with temporary.open("xb") as destination_stream:
+                temporary_created = True
+                while chunk := source_stream.read(1024 * 1024):
+                    destination_stream.write(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
         try:
-            destination.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise ToolError(f"Could not copy file: {exc}") from exc
-    return {"source": str(source), "destination": str(destination), "size_bytes": size, "sha256": digest.hexdigest()}
+            os.link(temporary, destination)
+        except FileExistsError as exc:
+            raise ToolError("The destination already exists; overwrite is not allowed.") from exc
+    except OSError as exc:
+        raise ToolExecutionError(f"Could not copy file: {exc}") from exc
+    finally:
+        if temporary_created:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                # The published destination remains valid; surface cleanup
+                # trouble without misreporting the copy operation itself.
+                cleanup_warning = f"Temporary staging file could not be removed: {exc}"
+    output = {"source": str(source), "destination": str(destination), "size_bytes": size, "sha256": digest.hexdigest()}
+    if cleanup_warning:
+        output["warning"] = cleanup_warning
+    return output
 
 
 class ToolError(ValueError):
     pass
+
+
+class ToolExecutionError(RuntimeError):
+    """Raised when a valid operation fails because of an operating-system error."""
+
+
+class ToolArgumentsError(ValueError):
+    """Raised when a proposed tool call does not match its registered schema."""
+
+    def __init__(self, detail: list[dict[str, Any]]) -> None:
+        super().__init__("Tool arguments failed schema validation.")
+        self.detail = detail
 
 
 def _list_directory(policy: PathPolicy, path: str) -> dict[str, Any]:
@@ -86,10 +119,17 @@ def _list_directory(policy: PathPolicy, path: str) -> dict[str, Any]:
     items = []
     for child in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
         try:
-            kind = "directory" if child.is_dir() else "file"
-            size = child.stat().st_size if kind == "file" else None
+            if child.is_symlink():
+                kind = "symlink"
+                size = child.lstat().st_size
+            elif child.is_dir():
+                kind = "directory"
+                size = None
+            else:
+                kind = "file"
+                size = child.stat().st_size
         except OSError as exc:
-            raise ToolError(f"Could not inspect {child.name}: {exc}") from exc
+            raise ToolExecutionError(f"Could not inspect {child.name}: {exc}") from exc
         items.append({"name": child.name, "type": kind, "size_bytes": size})
     return {"path": str(directory), "items": items, "count": len(items)}
 
@@ -185,6 +225,17 @@ class ToolRegistry:
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._tools))
 
+    def validate_arguments(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Validate and normalize arguments before policy checks or side effects."""
+        entry = self._tools.get(name)
+        if entry is None:
+            raise ToolArgumentsError([{"type": "unknown_tool", "loc": ["tool_name"], "msg": "Tool is not registered."}])
+        schema, _ = entry
+        try:
+            return schema.model_validate(arguments).model_dump()
+        except ValidationError as exc:
+            raise ToolArgumentsError(exc.errors(include_url=False)) from exc
+
     def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         entry = self._tools.get(name)
         if entry is None:
@@ -202,10 +253,7 @@ class ToolRegistry:
             return ToolResult(status="error", error_code="browser_error", output={"detail": str(exc)})
         except DesktopToolError as exc:
             return ToolResult(status="error", error_code="desktop_error", output={"detail": str(exc)})
+        except ToolExecutionError as exc:
+            return ToolResult(status="error", error_code="filesystem_error", output={"detail": str(exc)})
         except (ToolError, ValueError, OSError) as exc:
             return ToolResult(status="denied", error_code="policy_or_tool_error", output={"detail": str(exc)})
-
-
-def independently_list_names(directory: Path) -> list[str]:
-    """Fresh filesystem observation used by the verifier, separate from tool output."""
-    return sorted((entry.name for entry in directory.iterdir()), key=str.casefold)

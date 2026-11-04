@@ -9,12 +9,15 @@ import pytest
 
 from autopilot_ai.approved_dirs import add_approved_dirs, clear_approved_dirs, load_approved_dirs, remove_approved_dirs
 from autopilot_ai.agent import run_goal
+from autopilot_ai.browser import BrowserToolError, _http_status_error, open_webpage
+from autopilot_ai.cli import format_report
 from autopilot_ai.contracts import PlanStep, TaskPlan, ToolResult, Verification
-from autopilot_ai.desktop import DesktopToolError, _inspect_uia, inspect_active_window
+from autopilot_ai.desktop import DesktopToolError, _capture_screenshot, _inspect_uia, inspect_active_window
 from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
 from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
 from autopilot_ai.tools import ToolRegistry
+from autopilot_ai.verifier import verify_desktop_inspection, verify_directory_listing
 
 
 def test_natural_language_listing_runs_and_verifies(tmp_path: Path) -> None:
@@ -24,6 +27,20 @@ def test_natural_language_listing_runs_and_verifies(tmp_path: Path) -> None:
     assert report["status"] == "completed"
     assert report["verification"]["passed"] is True
     assert report["verification"]["evidence"]["fresh_names"] == ["sample.txt", "subfolder"]
+
+
+def test_directory_verifier_checks_types_sizes_path_and_count(tmp_path: Path) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("content", encoding="utf-8")
+    result = ToolRegistry(PathPolicy(tmp_path)).execute("list_directory", {"path": "."})
+    assert result.status == "success"
+
+    result.output["items"][0]["size_bytes"] = 999
+    verification = verify_directory_listing(result, tmp_path.resolve())
+
+    assert verification.passed is False
+    assert verification.evidence["path_matches"] is True
+    assert verification.evidence["count_matches"] is True
 
 
 def test_natural_language_search_is_recursive_and_verified(tmp_path: Path) -> None:
@@ -53,6 +70,73 @@ def test_bounded_multi_action_plan_verifies_each_step(tmp_path: Path) -> None:
     assert report["steps"][1]["tool_result"]["output"]["matches"] == [str((tmp_path / "report.pdf").resolve())]
 
 
+def test_multi_action_failure_reports_partial_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original_execute = ToolRegistry.execute
+
+    def fail_search(self: ToolRegistry, name: str, arguments: dict) -> ToolResult:
+        if name == "search_files":
+            return ToolResult(status="error", error_code="test_failure", output={"detail": "simulated search failure"})
+        return original_execute(self, name, arguments)
+
+    monkeypatch.setattr(ToolRegistry, "execute", fail_search)
+
+    report = run_goal("Show files and then find report.pdf", tmp_path)
+    rendered = format_report(report)
+
+    assert report["status"] == "partially_completed"
+    assert len(report["steps"]) == 2
+    assert report["steps"][0]["verification"]["passed"] is True
+    assert "Status: Partially completed" in rendered
+    assert "simulated search failure" in rendered
+
+
+def test_incomplete_filename_scan_is_not_reported_as_fully_failed_or_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ToolRegistry,
+        "execute",
+        lambda self, name, arguments: ToolResult(
+            status="success",
+            output={"query": "report.pdf", "match_mode": "exact", "roots": [str(tmp_path.resolve())], "matches": [], "count": 0, "truncated": False, "complete": False, "errors": ["permission denied"], "entries_scanned": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        "autopilot_ai.agent.verify_file_search",
+        lambda *args, **kwargs: Verification(passed=False, summary="Search is incomplete."),
+    )
+
+    report = run_goal("Find report.pdf", tmp_path)
+
+    assert report["status"] == "partially_completed"
+    assert report["verification"]["passed"] is False
+
+
+def test_normal_cli_report_is_readable_and_shows_actual_file_location(tmp_path: Path) -> None:
+    (tmp_path / "annual-report.pdf").write_bytes(b"pdf")
+
+    rendered = format_report(run_goal("Find annual-report.pdf", tmp_path))
+
+    assert "Task: Find annual-report.pdf" in rendered
+    assert "Status: Completed" in rendered
+    assert str((tmp_path / "annual-report.pdf").resolve()) in rendered
+    assert "Verification: passed" in rendered
+
+
+def test_normal_cli_report_shows_desktop_observation() -> None:
+    report = {
+        "status": "completed",
+        "goal": "Inspect active window",
+        "plan": {"description": "Inspect foreground window", "tool_name": "inspect_active_window"},
+        "tool_result": {"status": "success", "output": {"backend": "uia", "window_title": "Editor", "controls_returned": 1, "controls": [{"name": "Save", "control_type": "Button"}]}},
+        "verification": {"passed": True, "summary": "Window verified."},
+    }
+
+    rendered = format_report(report)
+
+    assert "Window: Editor" in rendered
+    assert "Save [Button]" in rendered
+    assert "Verification: passed" in rendered
+
+
 def test_multi_action_ollama_plan_is_used_when_it_matches_intent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "report.pdf").write_bytes(b"pdf")
     expected = plan_goal_steps("Show files and find report.pdf")
@@ -75,6 +159,43 @@ def test_multi_action_ollama_mismatch_uses_deterministic_fallback(tmp_path: Path
     assert report["status"] == "completed"
     assert report["planner"] == "heuristic_fallback"
     assert report["steps"][1]["plan"]["arguments"]["query"] == "report.pdf"
+
+
+def test_ollama_extra_tool_arguments_fall_back_to_intent_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    proposed = PlanStep(
+        step_id="step-1",
+        description="List files",
+        tool_name="list_directory",
+        arguments={"path": ".", "unexpected": "value"},
+        expected_result="List files",
+    )
+    monkeypatch.setattr("autopilot_ai.agent.plan_with_ollama", lambda goal, tools: proposed)
+
+    report = run_goal("Show files", tmp_path, planner="ollama")
+
+    assert report["status"] == "completed"
+    assert report["planner"] == "heuristic_fallback"
+    assert report["plan"]["arguments"] == {"path": "."}
+
+
+def test_malformed_plan_arguments_are_denied_before_path_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    malformed = PlanStep(
+        step_id="step-1",
+        description="Copy file",
+        tool_name="copy_file",
+        arguments={"source_path": "source.txt"},
+        expected_result="Copied",
+        risk_level="medium",
+        requires_approval=True,
+    )
+    monkeypatch.setattr("autopilot_ai.agent.plan_goal_steps", lambda goal: [malformed])
+
+    report = run_goal("Copy file source.txt to backup.txt", tmp_path, planner="heuristic")
+
+    assert report["status"] == "denied"
+    assert report["message"].startswith("The proposed plan contains invalid tool arguments")
+    assert report["argument_errors"][0]["loc"] == ("destination_path",)
+    assert not (tmp_path / "backup.txt").exists()
 
 
 def test_multi_action_plan_is_bounded_to_three_steps(tmp_path: Path) -> None:
@@ -121,6 +242,48 @@ def test_copy_file_refuses_overwrite_and_path_escape(tmp_path: Path) -> None:
     assert (tmp_path / "existing.txt").read_text(encoding="utf-8") == "keep"
 
 
+def test_copy_file_preserves_destination_created_after_precheck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "source.txt").write_text("source content", encoding="utf-8")
+    policy = PathPolicy(tmp_path)
+    destination = tmp_path / "raced.txt"
+
+    def destination_appears_during_resolution(path: str, root_index: int = 0) -> Path:
+        destination.write_text("concurrent content", encoding="utf-8")
+        return destination
+
+    monkeypatch.setattr(policy, "resolve_new_path", destination_appears_during_resolution)
+    result = ToolRegistry(policy).execute(
+        "copy_file",
+        {"source_path": "source.txt", "destination_path": "raced.txt"},
+    )
+
+    assert result.status == "denied"
+    assert destination.read_text(encoding="utf-8") == "concurrent content"
+    assert list(tmp_path.glob(".*.autopilot-tmp")) == []
+
+
+def test_copy_file_reports_source_read_failure_without_creating_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source content", encoding="utf-8")
+    original_open = Path.open
+
+    def fail_source_read(path: Path, *args, **kwargs):
+        if path == source and args and args[0] == "rb":
+            raise PermissionError("simulated access denied")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_source_read)
+    result = ToolRegistry(PathPolicy(tmp_path)).execute(
+        "copy_file",
+        {"source_path": "source.txt", "destination_path": "copy.txt"},
+    )
+
+    assert result.status == "error"
+    assert result.error_code == "filesystem_error"
+    assert not (tmp_path / "copy.txt").exists()
+    assert list(tmp_path.glob(".*.autopilot-tmp")) == []
+
+
 def test_public_webpage_request_runs_and_is_freshly_verified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     page_result = {"requested_url": "https://example.com/", "url": "https://example.com/", "http_status": 200, "title": "Example Domain", "text": "Example page", "text_truncated": False}
     monkeypatch.setattr("autopilot_ai.tools.open_webpage", lambda url: page_result)
@@ -145,11 +308,60 @@ def test_browser_tool_rejects_local_and_non_http_urls(tmp_path: Path) -> None:
     assert file_url.status == "denied"
 
 
+def test_browser_startup_failure_is_returned_as_tool_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from playwright.sync_api import Error as PlaywrightError
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            raise PlaywrightError("simulated missing browser binary")
+
+    class FakePlaywrightContext:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr("autopilot_ai.browser._validate_public_url", lambda url, dns_cache=None: url)
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: FakePlaywrightContext())
+
+    with pytest.raises(BrowserToolError, match="Could not start Chromium"):
+        open_webpage("https://example.test")
+
+
+def test_browser_403_explains_that_the_site_refused_access() -> None:
+    message = _http_status_error(403)
+
+    assert "HTTP 403 (Forbidden)" in message
+    assert "sign-in" in message
+    assert "automated browser access" in message
+
+
+def test_failed_browser_report_does_not_show_empty_page_metadata() -> None:
+    report = {
+        "status": "failed",
+        "goal": "Open https://chatgpt.com",
+        "plan": {"description": "Open a public web page", "tool_name": "open_webpage"},
+        "tool_result": {"status": "error", "error_code": "browser_error", "output": {"detail": _http_status_error(403)}},
+        "verification": {"passed": False, "summary": "Browser navigation did not complete successfully."},
+    }
+
+    rendered = format_report(report)
+
+    assert "Attempted operation:" in rendered
+    assert "(untitled)" not in rendered
+    assert "HTTP 403 (Forbidden)" in rendered
+    assert "open this site manually" in rendered
+
+
 def test_active_window_inspection_runs_and_verifies_without_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     observation = {
         "backend": "uia",
         "window_title": "Test Window",
         "process_id": 4321,
+        "window_handle": 6789,
         "controls": [{"name": "Save", "control_type": "Button", "automation_id": "save"}],
         "controls_returned": 1,
         "controls_truncated": False,
@@ -185,6 +397,79 @@ def test_desktop_inspection_uses_screenshot_fallback_only_after_uia_fails(monkey
     assert observed["uia_note"] == "UIA unavailable in the test."
     with pytest.raises(DesktopToolError, match="UIA unavailable"):
         inspect_active_window(screenshot_fallback=False)
+
+
+def test_screenshot_fallback_captures_only_active_window_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeImage:
+        width = 200
+        height = 100
+
+        def save(self, path: Path) -> None:
+            captured["path"] = Path(path)
+            Path(path).write_bytes(b"mock screenshot")
+
+    fake_win32gui = types.SimpleNamespace(
+        GetForegroundWindow=lambda: 123,
+        GetWindowRect=lambda handle: (10, 20, 210, 120),
+        GetWindowText=lambda handle: "Test window",
+        GetWindowThreadProcessId=lambda handle: (1, 456),
+    )
+    fake_pyautogui = types.SimpleNamespace(
+        size=lambda: (1920, 1080),
+        screenshot=lambda region: captured.update(region=region) or FakeImage(),
+    )
+    monkeypatch.setitem(sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
+
+    result = _capture_screenshot()
+
+    try:
+        assert captured["region"] == (10, 20, 200, 100)
+        assert result["window_handle"] == 123
+        assert result["window_title"] == "Test window"
+    finally:
+        captured["path"].unlink(missing_ok=True)
+
+
+def test_screenshot_verifier_checks_image_and_window_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image
+
+    screenshot_dir = Path(__file__).resolve().parents[1] / "down" / "screenshots"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    image_path = screenshot_dir / "autopilot-verifier-test.png"
+    Image.new("RGB", (40, 20), color="white").save(image_path)
+    monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(GetForegroundWindow=lambda: 123))
+    tool_result = ToolResult(
+        status="success",
+        output={"backend": "pyautogui_screenshot", "screenshot_path": str(image_path), "width": 40, "height": 20, "window_handle": 123},
+    )
+
+    try:
+        verified = verify_desktop_inspection(tool_result)
+        assert verified.passed is True
+        monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(GetForegroundWindow=lambda: 456))
+        changed_window = verify_desktop_inspection(tool_result)
+        assert changed_window.passed is False
+    finally:
+        image_path.unlink(missing_ok=True)
+
+
+def test_uia_verifier_detects_window_handle_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "autopilot_ai.verifier.inspect_active_window",
+        lambda **kwargs: {"backend": "uia", "window_title": "Editor", "process_id": 55, "window_handle": 456},
+    )
+    result = ToolResult(
+        status="success",
+        output={"backend": "uia", "window_title": "Editor", "process_id": 55, "window_handle": 123, "controls_returned": 1},
+    )
+
+    verification = verify_desktop_inspection(result)
+
+    assert verification.passed is False
+    assert verification.evidence["fresh_window_handle"] == 456
 
 
 def test_uia_inspects_the_foreground_window_handle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,6 +640,40 @@ def test_search_is_filename_only_and_rejects_parent_path(tmp_path: Path) -> None
     assert path_escape.status == "denied"
 
 
+def test_search_reports_inaccessible_subtree_as_incomplete_and_does_not_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def inaccessible_walk(root, topdown=True, onerror=None, followlinks=False):
+        if onerror:
+            onerror(PermissionError("simulated locked subtree"))
+        yield str(root), [], []
+
+    monkeypatch.setattr("autopilot_ai.tools.os.walk", inaccessible_walk)
+
+    report = run_goal("Find notes.txt", tmp_path)
+    rendered = format_report(report)
+
+    assert report["status"] == "partially_completed"
+    assert report["tool_result"]["output"]["complete"] is False
+    assert "simulated locked subtree" in report["tool_result"]["output"]["errors"][0]
+    assert report["attempts"] == 1
+    assert report["verification"]["passed"] is False
+    assert "Search warning: simulated locked subtree" in rendered
+
+
+def test_search_entry_limit_is_explicitly_incomplete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    too_many_directories = [f"directory-{index}" for index in range(100_001)]
+    monkeypatch.setattr(
+        "autopilot_ai.tools.os.walk",
+        lambda root, topdown=True, onerror=None, followlinks=False: iter([(str(root), too_many_directories, [])]),
+    )
+
+    result = ToolRegistry(PathPolicy(tmp_path)).execute("search_files", {"query": "missing.txt"})
+
+    assert result.status == "success"
+    assert result.output["complete"] is False
+    assert result.output["truncated"] is True
+    assert result.output["entries_scanned"] == 100_000
+
+
 def test_unknown_tool_is_denied(tmp_path: Path) -> None:
     result = ToolRegistry(PathPolicy(tmp_path)).execute("run_shell", {"command": "whoami"})
     assert result.status == "denied"
@@ -383,6 +702,37 @@ def test_symlink_escape_is_rejected(tmp_path: Path) -> None:
 def test_unsupported_goal_does_not_execute(tmp_path: Path) -> None:
     report = run_goal("Delete all files", tmp_path)
     assert report["status"] == "unsupported"
+
+
+@pytest.mark.parametrize(
+    ("goal", "question_fragment"),
+    [
+        ("Find files", "What filename"),
+        ("Create folder", "What name"),
+        ("Copy file source.txt", "Which source file"),
+    ],
+)
+def test_missing_required_details_request_clarification(tmp_path: Path, goal: str, question_fragment: str) -> None:
+    report = run_goal(goal, tmp_path)
+
+    assert report["status"] == "clarification_required"
+    assert question_fragment in report["question"]
+
+
+@pytest.mark.parametrize(
+    ("goal", "tool_name", "expected_arguments"),
+    [
+        ("Make a new folder called reports", "create_directory", {"path": "reports"}),
+        ("Duplicate file source.txt to backup.txt", "copy_file", {"source_path": "source.txt", "destination_path": "backup.txt"}),
+        ("Open the website https://example.com", "open_webpage", {"url": "https://example.com"}),
+        ("Browse https://example.com", "open_webpage", {"url": "https://example.com"}),
+    ],
+)
+def test_common_paraphrases_keep_the_same_bounded_tool_intent(goal: str, tool_name: str, expected_arguments: dict) -> None:
+    plan = plan_goal_steps(goal)[0]
+
+    assert plan.tool_name == tool_name
+    assert plan.arguments == expected_arguments
 
 
 def test_ollama_planner_returns_validated_registered_tool(monkeypatch: pytest.MonkeyPatch) -> None:

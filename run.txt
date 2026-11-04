@@ -1,0 +1,218 @@
+AUTOPILOT AI - POWERSHELL RUN GUIDE
+==================================
+
+Run all commands in PowerShell. Start in the project root. If your virtual
+environment already shows (.venv), you do not need to activate it again.
+
+1. START HERE
+-------------
+
+Set-Location D:\Agent
+if (-not $env:VIRTUAL_ENV) { .\.venv\Scripts\Activate.ps1 }
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
+
+Use `python` below. It will resolve to the active .venv Python.
+Do not run pytest from C:\Users\ASUS; run it from D:\Agent so it only
+collects this project's tests.
+
+# If Python dependencies are missing, install them using D: for the pip cache.
+$env:PIP_CACHE_DIR = "D:\Agent\down\pip-cache"
+python -m pip install -r requirements.txt
+
+# If local Chromium is missing, install its browser files under D:.
+$env:PLAYWRIGHT_BROWSERS_PATH = "D:\Agent\down\playwright-browsers"
+python -m playwright install chromium
+
+
+2. RUN THE TESTS
+----------------
+
+# Default tests (does not require Ollama or an interactive desktop)
+python -m pytest
+
+# Include the real Playwright test. Chromium must be installed under D:\Agent\down.
+# This uses a temporary local web page and does not contact a paid service.
+$env:AUTOPILOT_RUN_BROWSER_INTEGRATION = "1"
+python -m pytest tests/test_integration.py -v
+
+# Optional: use the configured local Ollama model. Ollama must be running first.
+$env:AUTOPILOT_RUN_OLLAMA_INTEGRATION = "1"
+python -m pytest tests/test_integration.py::test_live_ollama_plan_is_used_only_when_it_matches_intent -v
+
+# Optional: read the live foreground window. Run from an unlocked interactive
+# Windows desktop with an application window in the foreground.
+$env:AUTOPILOT_RUN_WINDOWS_INTEGRATION = "1"
+python -m pytest tests/test_integration.py::test_real_windows_uia_reads_foreground_window -v
+
+# Remove opt-in flags from this PowerShell window when finished (optional).
+Remove-Item Env:AUTOPILOT_RUN_BROWSER_INTEGRATION -ErrorAction SilentlyContinue
+Remove-Item Env:AUTOPILOT_RUN_OLLAMA_INTEGRATION -ErrorAction SilentlyContinue
+Remove-Item Env:AUTOPILOT_RUN_WINDOWS_INTEGRATION -ErrorAction SilentlyContinue
+
+
+3. CHECK OLLAMA (LOCAL MODEL PLANNER)
+-------------------------------------
+
+# This safe branch starts Ollama only when neither a listener nor process exists.
+$listener = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+$ollamaProcess = Get-Process ollama -ErrorAction SilentlyContinue | Select-Object -First 1
+
+if ($listener) {
+    # Already running: do NOT start another `ollama serve`.
+    $modelNames = (Invoke-RestMethod http://127.0.0.1:11434/api/tags).models | Select-Object -ExpandProperty name
+    $modelNames
+    if ($modelNames -contains "qwen2.5:0.5b") {
+        $env:AUTOPILOT_MODEL = "qwen2.5:0.5b"
+        python -m autopilot_ai.cli "Find source-check.txt" --planner ollama --debug
+    }
+    else {
+        Write-Host "Qwen is not listed. Do not pull until Ollama is configured to store models under D:\Agent\down\models."
+        Write-Host "Restart Ollama with OLLAMA_MODELS set to that D: path, then pull the model from a second PowerShell window."
+    }
+}
+elseif (-not $ollamaProcess) {
+    # No server/process: start it in this PowerShell window and leave it open.
+    # Use a second PowerShell window for AutoPilot. Model files are stored on D:.
+    $env:OLLAMA_MODELS = "D:\Agent\down\models"
+    ollama serve
+}
+else {
+    # A process exists but is not listening. Do not start a duplicate server.
+    # Quit it from the system tray (or Ctrl+C in its server terminal), restart with D: configured.
+    Write-Host "Ollama is running but is not listening on port 11434. Restart it with OLLAMA_MODELS set to D:\Agent\down\models."
+}
+
+# Only use this block if you just started `ollama serve` above. Skip it if the
+# already-listening branch ran AutoPilot. Use a SECOND PowerShell window to
+# pull a missing model; the server must have OLLAMA_MODELS set to D:.
+Set-Location D:\Agent
+.\.venv\Scripts\Activate.ps1
+ollama pull qwen2.5:0.5b
+(Invoke-RestMethod http://127.0.0.1:11434/api/tags).models | Select-Object -ExpandProperty name
+$env:AUTOPILOT_MODEL = "qwen2.5:0.5b"
+python -m autopilot_ai.cli "Find source-check.txt" --planner ollama --debug
+
+
+4. LIST THE WORKSPACE
+---------------------
+
+python -m autopilot_ai.cli "Show me the files in this folder" --planner heuristic
+
+# Full JSON plan, output, and independent verification evidence:
+python -m autopilot_ai.cli "Show me the files in this folder" --planner heuristic --debug
+
+
+5. SEARCH FILE NAMES
+--------------------
+
+# Exact filename search across workspace and currently approved search folders:
+python -m autopilot_ai.cli "Find source-check.txt" --planner heuristic
+
+# Partial filename search (filenames only, not document contents):
+python -m autopilot_ai.cli "Find files containing source" --planner heuristic
+
+# Inspect persistent search folders:
+python -m autopilot_ai.cli --list-approved-dirs
+
+# Search Downloads once without saving it to the persistent allowlist:
+python -m autopilot_ai.cli "AutoPilot_AI_Project_Blueprint.pdf" --planner heuristic --approved-dir "C:\Users\ASUS\Downloads"
+
+# Permanently allow Downloads for filename search, then verify the allowlist:
+python -m autopilot_ai.cli --approve-dir "C:\Users\ASUS\Downloads"
+python -m autopilot_ai.cli --list-approved-dirs
+
+# Remove Downloads from the persistent allowlist later if desired:
+python -m autopilot_ai.cli --unapprove-dir "C:\Users\ASUS\Downloads"
+
+
+6. CREATE A FOLDER (APPROVAL REQUIRED)
+--------------------------------------
+
+# Use a fresh name so it does not already exist. First command previews only:
+$runId = Get-Date -Format "yyyyMMdd-HHmmss"
+$folder = "reports-check-$runId"
+python -m autopilot_ai.cli "Create folder $folder" --planner heuristic
+
+# Review the preview. Then approve the same request and check the result:
+python -m autopilot_ai.cli "Create folder $folder" --planner heuristic --approve
+Test-Path ".\workspace\$folder"
+
+
+7. COPY A FILE (APPROVAL REQUIRED)
+----------------------------------
+
+# Make a uniquely named sample in the approved workspace:
+$copyId = Get-Date -Format "yyyyMMdd-HHmmss"
+$source = "source-check-$copyId.txt"
+$destination = "copy-check-$copyId.txt"
+Set-Content ".\workspace\$source" "AutoPilot copy test"
+
+# First command previews only. Review the source and destination in the plan.
+python -m autopilot_ai.cli "Copy file $source to $destination" --planner heuristic
+
+# Approve the same request, then check the copied content:
+python -m autopilot_ai.cli "Copy file $source to $destination" --planner heuristic --approve
+Get-Content ".\workspace\$destination"
+
+# Copy never overwrites an existing destination. Both paths are relative to
+# workspace; writing into extra approved search folders is not permitted.
+
+
+8. OPEN A PUBLIC WEB PAGE
+-------------------------
+
+python -m autopilot_ai.cli "Open https://example.com" --planner heuristic
+
+# Add --debug to see the complete page result and verification evidence:
+python -m autopilot_ai.cli "Open https://example.com" --planner heuristic --debug
+
+# A site may return 401/403, require sign-in, or block automated browsing.
+# AutoPilot uses a fresh browser session and does not reuse your normal browser login.
+
+
+9. INSPECT THE ACTIVE WINDOWS APP
+---------------------------------
+
+# Start the command, then switch to the app you want inspected during the delay:
+python -m autopilot_ai.cli "Inspect active window" --planner heuristic --delay-seconds 5
+
+# UI Automation reads visible controls. If that fails, a screenshot of the
+# foreground window's visible region is saved under D:\Agent\down\screenshots.
+# This feature does not click, type, or launch applications.
+
+
+10. MULTI-STEP TASK, CLARIFICATION, AND UNSUPPORTED REQUESTS
+-----------------------------------------------------------
+
+# Run two supported read-only steps. --debug shows evidence for each step:
+python -m autopilot_ai.cli "Show me the files and then find .gitkeep" --planner heuristic --debug
+
+# Missing details should produce a clarification question:
+python -m autopilot_ai.cli "Find files" --planner heuristic
+
+# Unsupported or destructive requests are rejected; terminal commands and
+# file deletion are not supported:
+python -m autopilot_ai.cli "Delete all files" --planner heuristic
+
+
+11. OUTPUT STATUS GUIDE
+-----------------------
+
+Completed             Operation ran and independent verification passed.
+Approval required     Review the plan, then repeat it with --approve.
+Clarification required Provide the filename, folder name, or other missing detail.
+Partially completed   Some requested steps passed; a later step failed or a search was incomplete.
+Failed                Operation or its verification failed.
+Denied                Policy or input validation rejected the operation.
+Unsupported           This type of request is not implemented.
+
+Use --debug on task commands to see structured JSON, attempts, and verification evidence.
+
+
+12. NOT IMPLEMENTED YET
+-----------------------
+
+There are no commands yet for unrestricted terminal/shell execution, deleting
+or moving files, clicking or typing in desktop apps, calendar operations,
+task-memory management, or a React dashboard. Unsupported requests should be
+reported as Unsupported or Denied; do not expect them to execute.

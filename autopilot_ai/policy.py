@@ -10,12 +10,18 @@ class PolicyError(ValueError):
 
 class PathPolicy:
     def __init__(self, approved_root: Path, additional_roots: Iterable[Path] = ()) -> None:
-        primary = approved_root.expanduser().resolve(strict=True)
+        try:
+            primary = approved_root.expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise PolicyError(f"Primary approved root cannot be resolved: {approved_root}") from exc
         if not primary.is_dir():
             raise PolicyError(f"Primary approved root is not a directory: {primary}")
         roots = [primary]
         for configured in additional_roots:
-            root = configured.expanduser().resolve(strict=True)
+            try:
+                root = configured.expanduser().resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise PolicyError(f"Approved search root cannot be resolved: {configured}") from exc
             if not root.is_dir():
                 raise PolicyError(f"Approved search root is not a directory: {root}")
             if root not in roots:
@@ -52,7 +58,10 @@ class PathPolicy:
             current = current / part
             if current.is_symlink():
                 raise PolicyError("Symbolic links are not allowed in approved paths.")
-        candidate = unresolved.resolve()
+        try:
+            candidate = unresolved.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise PolicyError("The requested path cannot be safely resolved.") from exc
         try:
             candidate.relative_to(selected_root)
         except ValueError as exc:

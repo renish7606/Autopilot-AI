@@ -1,11 +1,10 @@
-"""Independent postcondition check for the initial directory-listing tool."""
+"""Independent postcondition checks for filesystem, browser, and desktop tools."""
 
 from pathlib import Path
 import os
 import hashlib
 
 from .contracts import ToolResult, Verification
-from .tools import independently_list_names
 from .browser import open_webpage
 from .desktop import DesktopToolError, inspect_active_window
 
@@ -14,15 +13,41 @@ def verify_directory_listing(result: ToolResult, directory: Path) -> Verificatio
     if result.status != "success":
         return Verification(passed=False, summary="Tool did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})
     observed = result.output.get("items")
-    if not isinstance(observed, list) or any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in observed):
+    if not isinstance(observed, list) or any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("name"), str)
+        or item.get("type") not in {"file", "directory", "symlink"}
+        for item in observed
+    ):
         return Verification(passed=False, summary="Tool output did not contain a valid entry list.")
-    tool_names = sorted((item["name"] for item in observed), key=str.casefold)
-    fresh_names = independently_list_names(directory)
-    passed = tool_names == fresh_names
+    tool_items = sorted(observed, key=lambda item: item["name"].casefold())
+    fresh_items = []
+    try:
+        for child in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
+            if child.is_symlink():
+                fresh_items.append({"name": child.name, "type": "symlink", "size_bytes": child.lstat().st_size})
+            elif child.is_dir():
+                fresh_items.append({"name": child.name, "type": "directory", "size_bytes": None})
+            else:
+                fresh_items.append({"name": child.name, "type": "file", "size_bytes": child.stat().st_size})
+    except OSError as exc:
+        return Verification(passed=False, summary="A fresh directory scan could not verify the listing.", evidence={"error": str(exc)})
+    tool_names = [item["name"] for item in tool_items]
+    fresh_names = [item["name"] for item in fresh_items]
+    path_matches = result.output.get("path") == str(directory)
+    count_matches = result.output.get("count") == len(tool_items) == len(fresh_items)
+    passed = tool_items == fresh_items and path_matches and count_matches
     return Verification(
         passed=passed,
         summary="Workspace listing independently verified." if passed else "Workspace listing differs from a fresh filesystem scan.",
-        evidence={"tool_names": tool_names, "fresh_names": fresh_names},
+        evidence={
+            "tool_names": tool_names,
+            "fresh_names": fresh_names,
+            "tool_items": tool_items,
+            "fresh_items": fresh_items,
+            "path_matches": path_matches,
+            "count_matches": count_matches,
+        },
     )
 
 
@@ -175,8 +200,24 @@ def verify_desktop_inspection(result: ToolResult) -> Verification:
             fresh = inspect_active_window(max_controls=output.get("controls_returned", 60), screenshot_fallback=False)
         except DesktopToolError as exc:
             return Verification(passed=False, summary="A fresh UI Automation read could not verify the window.", evidence={"error": str(exc)})
-        same_window = fresh.get("window_title") == output.get("window_title") and fresh.get("process_id") == output.get("process_id")
-        return Verification(passed=same_window, summary="Active window independently verified with UI Automation." if same_window else "The active window changed before verification.", evidence={"window_title": output.get("window_title"), "fresh_window_title": fresh.get("window_title"), "process_id": output.get("process_id"), "fresh_process_id": fresh.get("process_id"), "same_window": same_window})
+        same_window = (
+            fresh.get("window_handle") == output.get("window_handle")
+            and fresh.get("window_title") == output.get("window_title")
+            and fresh.get("process_id") == output.get("process_id")
+        )
+        return Verification(
+            passed=same_window,
+            summary="Active window independently verified with UI Automation." if same_window else "The active window changed before verification.",
+            evidence={
+                "window_handle": output.get("window_handle"),
+                "fresh_window_handle": fresh.get("window_handle"),
+                "window_title": output.get("window_title"),
+                "fresh_window_title": fresh.get("window_title"),
+                "process_id": output.get("process_id"),
+                "fresh_process_id": fresh.get("process_id"),
+                "same_window": same_window,
+            },
+        )
     if output.get("backend") == "pyautogui_screenshot":
         path = Path(str(output.get("screenshot_path", ""))).resolve()
         screenshot_root = (Path(__file__).resolve().parents[1] / "down" / "screenshots").resolve()
@@ -189,5 +230,26 @@ def verify_desktop_inspection(result: ToolResult) -> Verification:
         except (OSError, ValueError, ImportError) as exc:
             return Verification(passed=False, summary="The saved screenshot could not be independently opened.", evidence={"screenshot_path": str(path), "error": str(exc)})
         dimensions_match = width == output.get("width") and height == output.get("height")
-        return Verification(passed=dimensions_match, summary="Saved desktop screenshot independently verified." if dimensions_match else "Screenshot dimensions differ from tool output.", evidence={"screenshot_path": str(path), "width": width, "height": height, "dimensions_match": dimensions_match})
+        try:
+            import win32gui
+
+            active_handle = int(win32gui.GetForegroundWindow())
+        except Exception as exc:
+            return Verification(passed=False, summary="The active window could not be rechecked after screenshot capture.", evidence={"screenshot_path": str(path), "error": str(exc)})
+        same_window = active_handle != 0 and active_handle == output.get("window_handle")
+        passed = dimensions_match and same_window
+        summary = "Active-window screenshot independently verified." if passed else "Screenshot dimensions or active-window identity changed before verification."
+        return Verification(
+            passed=passed,
+            summary=summary,
+            evidence={
+                "screenshot_path": str(path),
+                "width": width,
+                "height": height,
+                "dimensions_match": dimensions_match,
+                "captured_window_handle": output.get("window_handle"),
+                "fresh_window_handle": active_handle,
+                "same_window": same_window,
+            },
+        )
     return Verification(passed=False, summary="Desktop result used an unknown inspection backend.")

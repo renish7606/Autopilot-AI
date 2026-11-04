@@ -10,6 +10,8 @@ The local planner connects to Ollama at `http://127.0.0.1:11434` and defaults to
 
 ## Run
 
+For a PowerShell command walkthrough of each current feature and its verification steps, see [`run.txt`](run.txt).
+
 Requires Python 3.10+ and Pydantic 2. In PowerShell, first change to the project directory so pytest and Python only see this project:
 
 ```powershell
@@ -23,9 +25,9 @@ python -m playwright install chromium
 python -m autopilot_ai.cli "Show me the files in this folder"
 ```
 
-Playwright uses a fresh, headless Chromium context for each page. Browser binaries are kept under `D:\Agent\down\playwright-browsers`; the application sets this location by default. It only opens public HTTP/HTTPS pages, blocks localhost/private-network destinations, downloads, and requests other than GET/HEAD, and returns visible page text (up to 4,000 characters). It does not submit forms or reuse your personal browser profile.
+Playwright uses a fresh, headless Chromium context for each page. Browser binaries are kept under `D:\Agent\down\playwright-browsers`; the application sets this location by default. It only opens public HTTP/HTTPS pages, blocks localhost/private-network destinations, downloads, and requests other than GET/HEAD, and returns visible page text (up to 4,000 characters). It does not submit forms or reuse your personal browser profile. Sites can refuse automated requests or require sign-in; those responses are reported as failures, and AutoPilot cannot use a session from your regular browser.
 
-Desktop inspection uses pywinauto with the Windows UI Automation (`uia`) backend. If the active application does not expose usable UIA controls, the tool captures a screenshot with PyAutoGUI. Screenshots are saved under `D:\Agent\down\screenshots` and can include anything visible on screen. This phase does not click, type, or launch applications.
+Desktop inspection uses pywinauto with the Windows UI Automation (`uia`) backend. If UIA fails, the fallback captures only the visible region of the foreground window on the primary display with PyAutoGUI. Screenshots are saved under `D:\Agent\down\screenshots`; they may still contain sensitive information shown inside that application. Verification checks the image dimensions and that the same window remains active. This phase does not click, type, or launch applications.
 
 By default, the approved workspace is `workspace/`. Set `--workspace` to select a different primary root. For filename search, approve directories once and then search by filename alone. The local allowlist is stored in `data/approved_directories.json` on D: and can be inspected or cleared. `--approved-dir` remains available for a one-time root. Listing is limited to the primary root; filename search checks every approved root.
 
@@ -115,11 +117,45 @@ Set-Location D:\Agent
 python -m pytest
 ```
 
-The tests cover execution and independent verification for listing, search, directory creation, copying, browser page results, and desktop inspection; bounded retries; approval gating; no-overwrite behavior; URL restrictions; filename-only search; structured Ollama planning; deterministic fallback; unregistered tool denial; traversal and symlink escapes where supported; and unsupported goals. Browser and desktop tests use mocked observations and do not interact with the network or current desktop. On this machine, the global pytest install has a broken optional `langsmith` plugin; run with `$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"` before `python -m pytest` to avoid loading unrelated global plugins.
+The default suite includes isolated filesystem tests and unit tests for planner, policy, retry and verification behavior. Most browser and desktop unit tests use mocked observations. `tests/test_integration.py` also contains a real filesystem workflow test; its local Chromium and live Windows UIA tests are opt-in. On this machine, the global pytest install has a broken optional `langsmith` plugin; set `$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"` before running pytest to avoid loading unrelated global plugins.
 
-## Roadmap
+To run the real Playwright test against a temporary loopback-only HTTP page (with Chromium already installed under `D:\Agent\down`):
 
-Build one phase at a time: hardware and runtime setup; local model adapter and structured tool selection; bounded multi-step planning with Ollama; controlled file operations (create directory and copy file); Playwright browser access; Windows UI Automation with PyAutoGUI screenshot fallback; bounded recovery (current phase); persistent approvals and SQLite task memory; Google Calendar OAuth and approval policy; then the React dashboard and broader evaluation. Do not expose unrestricted shell execution or claim task success without verification.
+```powershell
+$env:AUTOPILOT_RUN_BROWSER_INTEGRATION = "1"
+python -m pytest tests/test_integration.py::test_real_playwright_follows_redirect_to_local_fixture
+```
+
+To run the real UI Automation check, use an unlocked interactive Windows desktop with a foreground app:
+
+```powershell
+$env:AUTOPILOT_RUN_WINDOWS_INTEGRATION = "1"
+python -m pytest tests/test_integration.py::test_real_windows_uia_reads_foreground_window
+```
+
+The live UIA test only reads the foreground window. It skips when the test runner has no interactive window, as is common in service or sandbox sessions.
+
+To require a live plan from the configured local Ollama model (the test fails if the deterministic fallback was used):
+
+```powershell
+$env:AUTOPILOT_RUN_OLLAMA_INTEGRATION = "1"
+python -m pytest tests/test_integration.py::test_live_ollama_plan_is_used_only_when_it_matches_intent
+```
+
+## CLI results
+
+By default, the CLI prints a short human-readable report with the task, status, actual result, verification and next action when needed. Use `--debug` to print the complete structured JSON report, including the plan and verification evidence:
+
+```powershell
+python -m autopilot_ai.cli "Find report.pdf"
+python -m autopilot_ai.cli "Find report.pdf" --debug
+```
+
+Multi-step tasks report `Partially completed` if earlier steps were verified but a later step failed. A failed operation is not described as completed.
+
+## Current improvement phase
+
+The current work is auditing and hardening the existing search, file operations, browser navigation, desktop inspection, planning, verification, recovery and CLI behavior before adding capabilities. Calendar integration, additional desktop controls, task memory, terminal execution and the React dashboard remain out of scope until the existing capabilities meet their acceptance criteria. Do not expose unrestricted shell execution or claim task success without verification.
 
 ## Safety boundary
 

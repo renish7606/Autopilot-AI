@@ -57,16 +57,37 @@ def _inspect_uia(max_controls: int) -> dict:
 
 def _capture_screenshot() -> dict:
     try:
+        import win32gui
         import pyautogui
     except ImportError as exc:
-        raise DesktopToolError("PyAutoGUI is not installed for screenshot fallback.") from exc
+        raise DesktopToolError("PyAutoGUI and pywin32 are required for active-window screenshot fallback.") from exc
+
+    try:
+        handle = win32gui.GetForegroundWindow()
+        if not handle:
+            raise DesktopToolError("Windows did not report a foreground window to capture.")
+        left, top, right, bottom = win32gui.GetWindowRect(handle)
+        screen_width, screen_height = pyautogui.size()
+        # Capture only the part of the foreground window visible on the primary
+        # display. Never silently fall back to a screenshot of every window.
+        left, top = max(0, left), max(0, top)
+        right, bottom = min(screen_width, right), min(screen_height, bottom)
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            raise DesktopToolError("The active window is not visible on the primary display.")
+        title = str(win32gui.GetWindowText(handle) or "")[:500]
+        _, process_id = win32gui.GetWindowThreadProcessId(handle)
+    except DesktopToolError:
+        raise
+    except Exception as exc:
+        raise DesktopToolError(f"Could not determine the active window bounds: {exc}") from exc
 
     directory = Path(__file__).resolve().parents[1] / "down" / "screenshots"
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = directory / f"active-window-{stamp}-{uuid4().hex[:8]}.png"
     try:
-        image = pyautogui.screenshot()
+        image = pyautogui.screenshot(region=(left, top, width, height))
         image.save(path)
     except Exception as exc:
         raise DesktopToolError(f"PyAutoGUI could not capture the screen: {exc}") from exc
@@ -75,6 +96,10 @@ def _capture_screenshot() -> dict:
         "screenshot_path": str(path),
         "width": int(image.width),
         "height": int(image.height),
+        "window_title": title,
+        "process_id": int(process_id),
+        "window_handle": int(handle),
+        "window_rect": [left, top, right, bottom],
     }
 
 

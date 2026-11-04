@@ -4,10 +4,10 @@ from pathlib import Path
 import time
 from typing import Any
 
-from .planner import ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
+from .planner import ClarificationRequired, ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
 from .policy import PathPolicy, PolicyError
 from .recovery import MAX_ATTEMPTS, should_retry
-from .tools import ToolRegistry
+from .tools import ToolArgumentsError, ToolRegistry
 from .verifier import verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open, verify_desktop_inspection
 
 
@@ -34,7 +34,7 @@ def run_goal(
                 expected_steps = plan_goal_steps(goal)
                 if len(expected_steps) > 1:
                     proposed_steps = plan_with_ollama_steps(goal, ("list_directory", "search_files"))
-                    if len(proposed_steps) == len(expected_steps) and all(_matches_intent(proposed, expected) for proposed, expected in zip(proposed_steps, expected_steps)):
+                    if len(proposed_steps) == len(expected_steps) and all(_matches_intent(proposed, expected, registry) for proposed, expected in zip(proposed_steps, expected_steps)):
                         steps = proposed_steps
                     else:
                         steps = expected_steps
@@ -42,7 +42,7 @@ def run_goal(
                         if len(proposed_steps) != len(expected_steps):
                             mismatch = f"The local model returned {len(proposed_steps)} step(s), but the request needs {len(expected_steps)}."
                         else:
-                            mismatch_index = next(index for index, pair in enumerate(zip(proposed_steps, expected_steps), start=1) if not _matches_intent(*pair))
+                            mismatch_index = next(index for index, pair in enumerate(zip(proposed_steps, expected_steps), start=1) if not _matches_intent(*pair, registry))
                             proposed, expected = proposed_steps[mismatch_index - 1], expected_steps[mismatch_index - 1]
                             if proposed.tool_name != expected.tool_name:
                                 mismatch = f"The local model chose a different tool for step {mismatch_index}."
@@ -54,21 +54,7 @@ def run_goal(
                 else:
                     proposed = plan_with_ollama(goal, registry.names)
                     expected = expected_steps[0]
-                    matches_intent = (
-                        proposed.tool_name == expected.tool_name
-                        and proposed.arguments.get("path", ".") == expected.arguments.get("path", ".")
-                    )
-                    if proposed.tool_name == "search_files":
-                        matches_intent = matches_intent and (
-                            str(proposed.arguments.get("query", "")).casefold().strip()
-                            == str(expected.arguments.get("query", "")).casefold().strip()
-                            and proposed.arguments.get("match_mode", "exact") == expected.arguments.get("match_mode", "exact")
-                            and proposed.arguments.get("max_results", 100) == expected.arguments.get("max_results", 100)
-                        )
-                    elif proposed.tool_name == "open_webpage":
-                        matches_intent = matches_intent and proposed.arguments.get("url", "").rstrip("/" ) == expected.arguments.get("url", "").rstrip("/" )
-                    elif proposed.tool_name == "inspect_active_window":
-                        matches_intent = matches_intent and proposed.arguments == expected.arguments
+                    matches_intent = _matches_intent(proposed, expected, registry)
                     if matches_intent:
                         steps = [proposed]
                     else:
@@ -78,6 +64,8 @@ def run_goal(
             except (ModelPlannerError, PlanningError) as model_error:
                 try:
                     steps = plan_goal_steps(goal)
+                except ClarificationRequired as intent_error:
+                    return {"status": "clarification_required", "goal": goal, "question": intent_error.question}
                 except PlanningError as intent_error:
                     return {"status": "unsupported", "goal": goal, "message": str(intent_error)}
                 planner_used = "heuristic_fallback"
@@ -86,6 +74,8 @@ def run_goal(
             return {"status": "error", "goal": goal, "message": f"Unknown planner: {planner}"}
     except ModelPlannerError as exc:
         return {"status": "error", "goal": goal, "message": str(exc)}
+    except ClarificationRequired as exc:
+        return {"status": "clarification_required", "goal": goal, "question": exc.question}
     except PlanningError as exc:
         return {"status": "unsupported", "goal": goal, "message": str(exc)}
 
@@ -97,6 +87,17 @@ def run_goal(
     for step in steps:
         if step.tool_name not in registry.names:
             return {"status": "denied", "goal": goal, "message": "Plan selected a tool that is not registered."}
+        try:
+            validated_arguments = registry.validate_arguments(step.tool_name, step.arguments)
+        except ToolArgumentsError as exc:
+            return {
+                "status": "denied",
+                "goal": goal,
+                "message": "The proposed plan contains invalid tool arguments; no operation was executed.",
+                "plan": step.model_dump(),
+                "argument_errors": exc.detail,
+            }
+        step = step.model_copy(update={"arguments": validated_arguments})
         try:
             if step.tool_name == "create_directory":
                 target = policy.resolve_new_path(step.arguments["path"])
@@ -120,7 +121,7 @@ def run_goal(
                 search_targets = [policy.resolve(step.arguments.get("path", "."), i) for i in range(len(policy.approved_roots))]
                 target = search_targets[0]
                 source = None
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OSError, RuntimeError) as exc:
             return {"status": "denied", "goal": goal, "message": f"Plan path rejected: {exc}"}
         if step.requires_approval and not approved:
             return {"status": "approval_required", "goal": goal, "planner": planner_used, "plan": step.model_dump(), "message": "This file operation will change the filesystem. Review the plan, then rerun with --approve to execute it."}
@@ -155,7 +156,24 @@ def run_goal(
         step_reports.append({"plan": step.model_dump(), "tool_result": result.model_dump(), "verification": verification.model_dump(), "attempts": len(attempt_history), "attempt_history": attempt_history})
         if result.status != "success" or not verification.passed:
             break
-    status = "completed" if len(step_reports) == len(steps) and all(report["verification"]["passed"] for report in step_reports) else "failed"
+    all_verified = len(step_reports) == len(steps) and all(
+        report["tool_result"]["status"] == "success" and report["verification"]["passed"]
+        for report in step_reports
+    )
+    if all_verified:
+        status = "completed"
+    elif (any(
+        report["tool_result"]["status"] == "success" and report["verification"]["passed"]
+        for report in step_reports[:-1]
+    ) or any(
+        report["plan"]["tool_name"] == "search_files"
+        and report["tool_result"]["status"] == "success"
+        and report["tool_result"]["output"].get("complete") is False
+        for report in step_reports
+    )):
+        status = "partially_completed"
+    else:
+        status = "failed"
     report = {
         "status": status,
         "goal": goal,
@@ -171,16 +189,13 @@ def run_goal(
     return report
 
 
-def _matches_intent(proposed, expected) -> bool:
-    """Require the model's ordered tool calls and meaningful arguments to match the user's parsed intent."""
-    if proposed.tool_name != expected.tool_name or proposed.arguments.get("path", ".") != expected.arguments.get("path", "."):
+def _matches_intent(proposed, expected, registry: ToolRegistry) -> bool:
+    """Require every normalized model argument to match deterministic user-intent parsing."""
+    if proposed.tool_name != expected.tool_name:
         return False
-    if proposed.tool_name == "search_files":
-        return (
-            str(proposed.arguments.get("query", "")).casefold().strip()
-            == str(expected.arguments.get("query", "")).casefold().strip()
-            and proposed.arguments.get("match_mode", "exact") == expected.arguments.get("match_mode", "exact")
-            and proposed.arguments.get("max_results", 100) == expected.arguments.get("max_results", 100)
-            and set(proposed.arguments).issubset({"path", "query", "match_mode", "max_results"})
-        )
-    return set(proposed.arguments).issubset({"path"})
+    try:
+        proposed_arguments = registry.validate_arguments(proposed.tool_name, proposed.arguments)
+        expected_arguments = registry.validate_arguments(expected.tool_name, expected.arguments)
+    except ToolArgumentsError:
+        return False
+    return proposed_arguments == expected_arguments
