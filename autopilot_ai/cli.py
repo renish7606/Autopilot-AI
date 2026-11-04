@@ -31,6 +31,7 @@ def main() -> None:
     parser.add_argument("--clear-approved-dirs", action="store_true", help="Clear the persistent search allowlist.")
     parser.add_argument("--planner", choices=("ollama", "heuristic"), default="ollama", help="Use local Ollama (default) or the deterministic starter planner")
     parser.add_argument("--approve", action="store_true", help="Explicitly approve the planned filesystem change (create/copy).")
+    parser.add_argument("--delay-seconds", type=int, choices=range(0, 31), default=0, help="Wait up to 30 seconds before desktop inspection so you can switch to the app to inspect.")
     args = parser.parse_args()
 
     managing = bool(args.approve_dir or args.unapprove_dir or args.list_approved_dirs or args.clear_approved_dirs)
@@ -59,7 +60,7 @@ def main() -> None:
         if not args.goal:
             parser.error("Provide a natural-language task or filename, or use an approved-directory management option.")
         approved_dirs = [*load_approved_dirs(), *args.approved_dir]
-        report = run_goal(args.goal, args.workspace, planner=args.planner, approved_dirs=approved_dirs, approved=args.approve)
+        report = run_goal(args.goal, args.workspace, planner=args.planner, approved_dirs=approved_dirs, approved=args.approve, desktop_delay_seconds=args.delay_seconds)
     except ApprovedDirectoryError as exc:
         print(json.dumps({"status": "error", "message": str(exc)}, indent=2))
         raise SystemExit(1) from exc

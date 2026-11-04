@@ -9,3 +9,4 @@ workspace/*
 down/models/
 down/pip-cache/
 down/playwright-browsers/
+down/screenshots/

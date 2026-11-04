@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .browser import BrowserPolicyError, BrowserToolError, OpenWebpageArgs, open_webpage
 from .contracts import ToolResult
+from .desktop import DesktopToolError, inspect_active_window
 from .policy import PathPolicy
 
 
@@ -39,6 +40,13 @@ class CopyFileArgs(BaseModel):
     source_path: str = Field(min_length=1, max_length=300)
     destination_path: str = Field(min_length=1, max_length=300)
     source_root_index: int = Field(default=0, ge=0)
+
+
+class InspectActiveWindowArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_controls: int = Field(default=60, ge=1, le=100)
+    screenshot_fallback: bool = True
 
 
 def _create_directory(policy: PathPolicy, path: str) -> dict[str, Any]:
@@ -170,6 +178,7 @@ class ToolRegistry:
             "create_directory": (CreateDirectoryArgs, _create_directory),
             "copy_file": (CopyFileArgs, _copy_file),
             "open_webpage": (OpenWebpageArgs, lambda policy, url: open_webpage(url)),
+            "inspect_active_window": (InspectActiveWindowArgs, lambda policy, max_controls, screenshot_fallback: inspect_active_window(max_controls, screenshot_fallback)),
         }
 
     @property
@@ -191,6 +200,8 @@ class ToolRegistry:
             return ToolResult(status="denied", error_code="browser_policy_denied", output={"detail": str(exc)})
         except BrowserToolError as exc:
             return ToolResult(status="error", error_code="browser_error", output={"detail": str(exc)})
+        except DesktopToolError as exc:
+            return ToolResult(status="error", error_code="desktop_error", output={"detail": str(exc)})
         except (ToolError, ValueError, OSError) as exc:
             return ToolResult(status="denied", error_code="policy_or_tool_error", output={"detail": str(exc)})
 

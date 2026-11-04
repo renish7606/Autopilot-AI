@@ -1,12 +1,14 @@
 """One bounded receive-plan-policy-execute-verify cycle."""
 
 from pathlib import Path
+import time
 from typing import Any
 
 from .planner import ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
 from .policy import PathPolicy, PolicyError
+from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolRegistry
-from .verifier import verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open
+from .verifier import verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open, verify_desktop_inspection
 
 
 def run_goal(
@@ -15,6 +17,7 @@ def run_goal(
     planner: str = "heuristic",
     approved_dirs: tuple[Path, ...] | list[Path] = (),
     approved: bool = False,
+    desktop_delay_seconds: int = 0,
 ) -> dict[str, Any]:
     try:
         policy = PathPolicy(workspace, approved_dirs)
@@ -64,6 +67,8 @@ def run_goal(
                         )
                     elif proposed.tool_name == "open_webpage":
                         matches_intent = matches_intent and proposed.arguments.get("url", "").rstrip("/" ) == expected.arguments.get("url", "").rstrip("/" )
+                    elif proposed.tool_name == "inspect_active_window":
+                        matches_intent = matches_intent and proposed.arguments == expected.arguments
                     if matches_intent:
                         steps = [proposed]
                     else:
@@ -85,6 +90,10 @@ def run_goal(
         return {"status": "unsupported", "goal": goal, "message": str(exc)}
 
     step_reports = []
+    if not isinstance(desktop_delay_seconds, int) or isinstance(desktop_delay_seconds, bool) or not 0 <= desktop_delay_seconds <= 30:
+        return {"status": "error", "goal": goal, "message": "Desktop delay must be an integer from 0 to 30 seconds."}
+    if desktop_delay_seconds and any(step.tool_name != "inspect_active_window" for step in steps):
+        return {"status": "error", "goal": goal, "message": "--delay-seconds can only be used with desktop inspection."}
     for step in steps:
         if step.tool_name not in registry.names:
             return {"status": "denied", "goal": goal, "message": "Plan selected a tool that is not registered."}
@@ -93,6 +102,9 @@ def run_goal(
                 target = policy.resolve_new_path(step.arguments["path"])
                 source = None
             elif step.tool_name == "open_webpage":
+                target = None
+                source = None
+            elif step.tool_name == "inspect_active_window":
                 target = None
                 source = None
             elif step.tool_name == "copy_file":
@@ -112,20 +124,35 @@ def run_goal(
             return {"status": "denied", "goal": goal, "message": f"Plan path rejected: {exc}"}
         if step.requires_approval and not approved:
             return {"status": "approval_required", "goal": goal, "planner": planner_used, "plan": step.model_dump(), "message": "This file operation will change the filesystem. Review the plan, then rerun with --approve to execute it."}
-        result = registry.execute(step.tool_name, step.arguments)
-        if step.tool_name == "create_directory":
-            verification = verify_created_directory(result, target)
-        elif step.tool_name == "copy_file":
-            verification = verify_copied_file(result, source, target)
-        elif step.tool_name == "open_webpage":
-            verification = verify_webpage_open(result, step.arguments["url"])
-        elif step.tool_name == "list_directory":
-            verification = verify_directory_listing(result, target)
-        elif step.tool_name == "search_files":
-            verification = verify_file_search(result, search_targets or [target], step.arguments.get("query", ""), step.arguments.get("match_mode", "exact"), step.arguments.get("max_results", 100))
-        else:
-            return {"status": "denied", "goal": goal, "message": "No verifier is registered for the selected tool."}
-        step_reports.append({"plan": step.model_dump(), "tool_result": result.model_dump(), "verification": verification.model_dump()})
+        if step.tool_name == "inspect_active_window" and desktop_delay_seconds:
+            time.sleep(desktop_delay_seconds)
+        attempt_history = []
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            result = registry.execute(step.tool_name, step.arguments)
+            if step.tool_name == "create_directory":
+                verification = verify_created_directory(result, target)
+            elif step.tool_name == "copy_file":
+                verification = verify_copied_file(result, source, target)
+            elif step.tool_name == "open_webpage":
+                verification = verify_webpage_open(result, step.arguments["url"])
+            elif step.tool_name == "inspect_active_window":
+                verification = verify_desktop_inspection(result)
+            elif step.tool_name == "list_directory":
+                verification = verify_directory_listing(result, target)
+            elif step.tool_name == "search_files":
+                verification = verify_file_search(result, search_targets or [target], step.arguments.get("query", ""), step.arguments.get("match_mode", "exact"), step.arguments.get("max_results", 100))
+            else:
+                return {"status": "denied", "goal": goal, "message": "No verifier is registered for the selected tool."}
+            attempt_history.append({
+                "attempt": attempt,
+                "tool_status": result.status,
+                "error_code": result.error_code,
+                "verification_passed": verification.passed,
+                "summary": verification.summary,
+            })
+            if not should_retry(step.tool_name, result, verification, attempt):
+                break
+        step_reports.append({"plan": step.model_dump(), "tool_result": result.model_dump(), "verification": verification.model_dump(), "attempts": len(attempt_history), "attempt_history": attempt_history})
         if result.status != "success" or not verification.passed:
             break
     status = "completed" if len(step_reports) == len(steps) and all(report["verification"]["passed"] for report in step_reports) else "failed"

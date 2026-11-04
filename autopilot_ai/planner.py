@@ -24,6 +24,8 @@ def plan_goal(goal: str) -> PlanStep:
     model adapter and its measured hardware profile are ready.
     """
     normalized = " ".join(goal.casefold().replace("_", " ").split())
+    if any(phrase in normalized for phrase in ("inspect active window", "inspect the active window", "inspect screen", "what is on screen", "what's on screen", "what is on my screen", "what's on my screen", "read active window")):
+        return PlanStep(step_id="step-1", description="Inspect the active desktop window using Windows UI Automation.", tool_name="inspect_active_window", arguments={"max_controls": 60, "screenshot_fallback": True}, expected_result="A fresh UI Automation read or a saved screenshot confirms the active window state.", risk_level="low", requires_approval=False)
     browser_match = re.fullmatch(r"(?:please\s+)?(?:open|visit|browse to|go to)\s+(https?://\S+)", goal.strip(), flags=re.IGNORECASE)
     if browser_match:
         url = browser_match.group(1).rstrip(".,;!?)]\"'")
@@ -161,7 +163,8 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
     """Ask the local model for a short plan; validate it but never execute it here."""
     system = (
         "You are a constrained planner. Return a JSON object matching the schema with an ordered steps array of 1 to 3 steps. "
-        "Only use list_directory, search_files, and open_webpage. open_webpage reads visible text from a public HTTP or HTTPS page. "
+        "Only use list_directory, search_files, open_webpage, and inspect_active_window. open_webpage reads visible text from a public HTTP or HTTPS page. "
+        "inspect_active_window reads visible controls from the current Windows window, with an optional screenshot fallback. Never click or type. "
         "list_directory lists immediate entries in the primary approved workspace. "
         "search_files searches filenames across explicitly approved roots; never search contents. Use relative path '.'. "
         "For exact filename search use query equal to the filename and match_mode='exact'; for a requested partial name use "
@@ -181,6 +184,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
         "list_directory": ("List entries in the approved workspace.", "A fresh workspace scan matches the tool's returned entry names."),
         "search_files": ("Search filenames under the approved workspace.", "An independent filename scan matches the returned search results."),
         "open_webpage": ("Open a public web page and read its visible text.", "A fresh browser page load returns an HTTP response and visible page content."),
+        "inspect_active_window": ("Inspect the active desktop window using Windows UI Automation.", "A fresh UI Automation read or a saved screenshot confirms the active window state."),
     }
     normalized: list[PlanStep] = []
     for index, step in enumerate(task_plan.steps, start=1):

@@ -7,6 +7,7 @@ import hashlib
 from .contracts import ToolResult, Verification
 from .tools import independently_list_names
 from .browser import open_webpage
+from .desktop import DesktopToolError, inspect_active_window
 
 
 def verify_directory_listing(result: ToolResult, directory: Path) -> Verification:
@@ -163,3 +164,30 @@ def verify_webpage_open(result: ToolResult, requested_url: str) -> Verification:
     same_title = fresh["title"] == observed["title"]
     passed = 200 <= fresh["http_status"] < 400 and same_url and same_title
     return Verification(passed=passed, summary="Page load independently verified in a fresh browser context." if passed else "A fresh page load differed from the original navigation.", evidence={"first_url": observed["url"], "fresh_url": fresh["url"], "first_title": observed["title"], "fresh_title": fresh["title"], "fresh_http_status": fresh["http_status"], "url_matches": same_url, "title_matches": same_title})
+
+
+def verify_desktop_inspection(result: ToolResult) -> Verification:
+    if result.status != "success":
+        return Verification(passed=False, summary="Desktop inspection did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})
+    output = result.output
+    if output.get("backend") == "uia":
+        try:
+            fresh = inspect_active_window(max_controls=output.get("controls_returned", 60), screenshot_fallback=False)
+        except DesktopToolError as exc:
+            return Verification(passed=False, summary="A fresh UI Automation read could not verify the window.", evidence={"error": str(exc)})
+        same_window = fresh.get("window_title") == output.get("window_title") and fresh.get("process_id") == output.get("process_id")
+        return Verification(passed=same_window, summary="Active window independently verified with UI Automation." if same_window else "The active window changed before verification.", evidence={"window_title": output.get("window_title"), "fresh_window_title": fresh.get("window_title"), "process_id": output.get("process_id"), "fresh_process_id": fresh.get("process_id"), "same_window": same_window})
+    if output.get("backend") == "pyautogui_screenshot":
+        path = Path(str(output.get("screenshot_path", ""))).resolve()
+        screenshot_root = (Path(__file__).resolve().parents[1] / "down" / "screenshots").resolve()
+        try:
+            path.relative_to(screenshot_root)
+            from PIL import Image
+            with Image.open(path) as image:
+                width, height = image.size
+                image.verify()
+        except (OSError, ValueError, ImportError) as exc:
+            return Verification(passed=False, summary="The saved screenshot could not be independently opened.", evidence={"screenshot_path": str(path), "error": str(exc)})
+        dimensions_match = width == output.get("width") and height == output.get("height")
+        return Verification(passed=dimensions_match, summary="Saved desktop screenshot independently verified." if dimensions_match else "Screenshot dimensions differ from tool output.", evidence={"screenshot_path": str(path), "width": width, "height": height, "dimensions_match": dimensions_match})
+    return Verification(passed=False, summary="Desktop result used an unknown inspection backend.")

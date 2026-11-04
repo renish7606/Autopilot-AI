@@ -1,15 +1,19 @@
 from pathlib import Path
 from io import BytesIO
 import json
+import sys
+import types
 from urllib.error import HTTPError
 
 import pytest
 
 from autopilot_ai.approved_dirs import add_approved_dirs, clear_approved_dirs, load_approved_dirs, remove_approved_dirs
 from autopilot_ai.agent import run_goal
-from autopilot_ai.contracts import PlanStep, TaskPlan
+from autopilot_ai.contracts import PlanStep, TaskPlan, ToolResult, Verification
+from autopilot_ai.desktop import DesktopToolError, _inspect_uia, inspect_active_window
 from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
 from autopilot_ai.policy import PathPolicy, PolicyError
+from autopilot_ai.recovery import should_retry
 from autopilot_ai.tools import ToolRegistry
 
 
@@ -139,6 +143,137 @@ def test_browser_tool_rejects_local_and_non_http_urls(tmp_path: Path) -> None:
 
     assert local.status == "denied"
     assert file_url.status == "denied"
+
+
+def test_active_window_inspection_runs_and_verifies_without_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    observation = {
+        "backend": "uia",
+        "window_title": "Test Window",
+        "process_id": 4321,
+        "controls": [{"name": "Save", "control_type": "Button", "automation_id": "save"}],
+        "controls_returned": 1,
+        "controls_truncated": False,
+    }
+    monkeypatch.setattr("autopilot_ai.tools.inspect_active_window", lambda max_controls=60, screenshot_fallback=True: observation)
+    monkeypatch.setattr("autopilot_ai.verifier.inspect_active_window", lambda max_controls=60, screenshot_fallback=False: observation)
+
+    report = run_goal("Inspect active window", tmp_path)
+
+    assert report["status"] == "completed"
+    assert report["plan"]["tool_name"] == "inspect_active_window"
+    assert report["tool_result"]["output"]["window_title"] == "Test Window"
+    assert report["verification"]["passed"] is True
+
+
+def test_desktop_tool_rejects_unbounded_control_count(tmp_path: Path) -> None:
+    result = ToolRegistry(PathPolicy(tmp_path)).execute("inspect_active_window", {"max_controls": 1000})
+    assert result.status == "denied"
+    assert result.error_code == "invalid_arguments"
+
+
+def test_desktop_inspection_uses_screenshot_fallback_only_after_uia_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failed_uia(max_controls: int) -> dict:
+        raise DesktopToolError("UIA unavailable in the test.")
+
+    screenshot = {"backend": "pyautogui_screenshot", "screenshot_path": "D:/Agent/down/screenshots/test.png", "width": 800, "height": 600}
+    monkeypatch.setattr("autopilot_ai.desktop._inspect_uia", failed_uia)
+    monkeypatch.setattr("autopilot_ai.desktop._capture_screenshot", lambda: screenshot)
+
+    observed = inspect_active_window()
+
+    assert observed["backend"] == "pyautogui_screenshot"
+    assert observed["uia_note"] == "UIA unavailable in the test."
+    with pytest.raises(DesktopToolError, match="UIA unavailable"):
+        inspect_active_window(screenshot_fallback=False)
+
+
+def test_uia_inspects_the_foreground_window_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    control = types.SimpleNamespace(
+        element_info=types.SimpleNamespace(control_type="Button", automation_id="ok"),
+        window_text=lambda: "OK",
+    )
+
+    class Window:
+        def window_text(self) -> str:
+            return "Dialog"
+
+        def process_id(self) -> int:
+            return 1234
+
+        def descendants(self) -> list[object]:
+            return [control]
+
+    class WindowSpec:
+        def wrapper_object(self) -> Window:
+            return Window()
+
+    class Desktop:
+        def __init__(self, backend: str) -> None:
+            assert backend == "uia"
+
+        def window(self, handle: int) -> WindowSpec:
+            assert handle == 5678
+            return WindowSpec()
+
+    monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(GetForegroundWindow=lambda: 5678))
+    monkeypatch.setitem(sys.modules, "pywinauto", types.SimpleNamespace(Desktop=Desktop))
+
+    observed = _inspect_uia(20)
+
+    assert observed["window_title"] == "Dialog"
+    assert observed["window_handle"] == 5678
+    assert observed["controls"][0]["name"] == "OK"
+
+
+def test_desktop_delay_waits_before_inspection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    observation = {"backend": "uia", "window_title": "Test Window", "process_id": 4321, "controls": [], "controls_returned": 0, "controls_truncated": False}
+    monkeypatch.setattr("autopilot_ai.tools.inspect_active_window", lambda max_controls=60, screenshot_fallback=True: observation)
+    monkeypatch.setattr("autopilot_ai.verifier.inspect_active_window", lambda max_controls=60, screenshot_fallback=False: observation)
+    waited: list[int] = []
+    monkeypatch.setattr("autopilot_ai.agent.time.sleep", waited.append)
+
+    report = run_goal("Inspect active window", tmp_path, desktop_delay_seconds=5)
+
+    assert report["status"] == "completed"
+    assert waited == [5]
+
+
+def test_read_only_tool_retries_once_after_verification_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "sample.txt").write_text("sample", encoding="utf-8")
+    verification_count = 0
+
+    def transient_verification(result: ToolResult, directory: Path) -> Verification:
+        nonlocal verification_count
+        verification_count += 1
+        return Verification(passed=verification_count == 2, summary="temporary mismatch" if verification_count == 1 else "verified")
+
+    monkeypatch.setattr("autopilot_ai.agent.verify_directory_listing", transient_verification)
+
+    report = run_goal("Show me the files in this folder", tmp_path)
+
+    assert report["status"] == "completed"
+    assert report["attempts"] == 2
+    assert report["attempt_history"][0]["verification_passed"] is False
+    assert report["attempt_history"][1]["verification_passed"] is True
+
+
+def test_mutating_tool_is_never_retried_after_verification_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("autopilot_ai.agent.verify_created_directory", lambda result, destination: Verification(passed=False, summary="test mismatch"))
+
+    report = run_goal("Create folder reports", tmp_path, approved=True)
+
+    assert report["status"] == "failed"
+    assert report["attempts"] == 1
+    assert (tmp_path / "reports").is_dir()
+
+
+def test_recovery_does_not_retry_incomplete_search_or_http_client_error() -> None:
+    incomplete_search = ToolResult(status="success", output={"complete": False})
+    failed_verification = Verification(passed=False, summary="incomplete")
+    browser_404 = ToolResult(status="error", error_code="browser_error", output={"detail": "The page returned HTTP 404."})
+
+    assert should_retry("search_files", incomplete_search, failed_verification, 1) is False
+    assert should_retry("open_webpage", browser_404, failed_verification, 1) is False
 
 
 def test_exact_filename_search_spans_all_approved_roots(tmp_path: Path) -> None:
