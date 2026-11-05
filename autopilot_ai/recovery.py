@@ -1,5 +1,7 @@
 """Small retry policy for transient, read-only failures."""
 
+import re
+
 from .contracts import ToolResult, Verification
 
 
@@ -13,7 +15,7 @@ def should_retry(tool_name: str, result: ToolResult, verification: Verification,
         return False
     if result.status == "error":
         detail = str(result.output.get("detail", ""))
-        if result.error_code == "browser_error" and "page returned HTTP 4" in detail:
+        if result.error_code == "browser_error" and re.search(r"\bHTTP\s+4\d{2}\b", detail, re.IGNORECASE):
             return False
         return result.error_code in {"browser_error", "desktop_error"}
     if result.status == "success" and not verification.passed:

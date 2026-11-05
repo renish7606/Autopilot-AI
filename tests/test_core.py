@@ -17,7 +17,7 @@ from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_goal_ste
 from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
 from autopilot_ai.tools import ToolRegistry
-from autopilot_ai.verifier import verify_desktop_inspection, verify_directory_listing
+from autopilot_ai.verifier import verify_desktop_inspection, verify_directory_listing, verify_webpage_open
 
 
 def test_natural_language_listing_runs_and_verifies(tmp_path: Path) -> None:
@@ -135,6 +135,29 @@ def test_normal_cli_report_shows_desktop_observation() -> None:
     assert "Window: Editor" in rendered
     assert "Save [Button]" in rendered
     assert "Verification: passed" in rendered
+
+
+def test_normal_cli_report_explains_screenshot_fallback() -> None:
+    report = {
+        "status": "completed",
+        "goal": "Inspect active window",
+        "plan": {"description": "Inspect foreground window", "tool_name": "inspect_active_window"},
+        "tool_result": {
+            "status": "success",
+            "output": {
+                "backend": "pyautogui_screenshot",
+                "screenshot_path": "D:/Agent/down/screenshots/window.png",
+                "uia_note": "UIA could not read this application.",
+            },
+        },
+        "verification": {"passed": True, "summary": "Active-window screenshot independently verified."},
+    }
+
+    rendered = format_report(report)
+
+    assert "screenshot saved to" in rendered
+    assert "UI Automation could not read the window" in rendered
+    assert "UIA could not read this application" in rendered
 
 
 def test_multi_action_ollama_plan_is_used_when_it_matches_intent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,6 +321,70 @@ def test_public_webpage_request_runs_and_is_freshly_verified(tmp_path: Path, mon
     assert report["verification"]["evidence"]["fresh_http_status"] == 200
 
 
+@pytest.mark.parametrize(
+    ("reported_url", "fresh_status"),
+    [("https://other.example/", 200), ("https://example.com/", 503)],
+)
+def test_webpage_verifier_rejects_mismatched_request_or_response(
+    monkeypatch: pytest.MonkeyPatch, reported_url: str, fresh_status: int
+) -> None:
+    requested = "https://example.com/"
+    observed = {
+        "requested_url": reported_url,
+        "url": requested,
+        "http_status": 200,
+        "title": "Example",
+        "text": "Visible page text",
+    }
+    fresh = {**observed, "requested_url": requested, "http_status": fresh_status}
+    monkeypatch.setattr("autopilot_ai.verifier.open_webpage", lambda url: fresh)
+
+    verification = verify_webpage_open(ToolResult(status="success", output=observed), requested)
+
+    assert verification.passed is False
+    if reported_url != requested:
+        assert verification.evidence["reported_requested_url"] == reported_url
+    else:
+        assert verification.evidence["status_matches"] is False
+
+
+def test_webpage_verifier_accepts_dynamic_title_when_url_status_and_text_are_valid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = "https://example.com/"
+    observed = {
+        "requested_url": requested,
+        "url": requested,
+        "http_status": 200,
+        "title": "Example at 10:00",
+        "text": "Page content",
+    }
+    fresh = {**observed, "title": "Example at 10:01"}
+    monkeypatch.setattr("autopilot_ai.verifier.open_webpage", lambda url: fresh)
+
+    verification = verify_webpage_open(ToolResult(status="success", output=observed), requested)
+
+    assert verification.passed is True
+    assert verification.evidence["title_matches"] is False
+    assert verification.evidence["visible_text_present"] is True
+
+
+def test_webpage_verifier_rejects_empty_visible_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested = "https://example.com/"
+    observed = {
+        "requested_url": requested,
+        "url": requested,
+        "http_status": 200,
+        "title": "Example",
+        "text": "  ",
+    }
+
+    verification = verify_webpage_open(ToolResult(status="success", output=observed), requested)
+
+    assert verification.passed is False
+    assert verification.evidence["http_status"] == 200
+
+
 def test_browser_tool_rejects_local_and_non_http_urls(tmp_path: Path) -> None:
     registry = ToolRegistry(PathPolicy(tmp_path))
 
@@ -306,6 +393,16 @@ def test_browser_tool_rejects_local_and_non_http_urls(tmp_path: Path) -> None:
 
     assert local.status == "denied"
     assert file_url.status == "denied"
+
+
+def test_browser_dns_resolution_timeout_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    def timeout(*args, **kwargs):
+        raise TimeoutError("simulated DNS timeout")
+
+    monkeypatch.setattr("autopilot_ai.browser.socket.getaddrinfo", timeout)
+
+    with pytest.raises(BrowserToolError, match="Could not resolve public web host"):
+        open_webpage("https://example.test")
 
 
 def test_browser_startup_failure_is_returned_as_tool_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -416,11 +513,13 @@ def test_screenshot_fallback_captures_only_active_window_region(monkeypatch: pyt
         GetWindowText=lambda handle: "Test window",
         GetWindowThreadProcessId=lambda handle: (1, 456),
     )
+    fake_win32process = types.SimpleNamespace(GetWindowThreadProcessId=lambda handle: (1, 456))
     fake_pyautogui = types.SimpleNamespace(
         size=lambda: (1920, 1080),
         screenshot=lambda region: captured.update(region=region) or FakeImage(),
     )
     monkeypatch.setitem(sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setitem(sys.modules, "win32process", fake_win32process)
     monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
 
     result = _capture_screenshot()
@@ -443,7 +542,7 @@ def test_screenshot_verifier_checks_image_and_window_identity(monkeypatch: pytes
     monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(GetForegroundWindow=lambda: 123))
     tool_result = ToolResult(
         status="success",
-        output={"backend": "pyautogui_screenshot", "screenshot_path": str(image_path), "width": 40, "height": 20, "window_handle": 123},
+        output={"backend": "pyautogui_screenshot", "screenshot_path": str(image_path), "width": 40, "height": 20, "window_handle": 123, "window_rect": [0, 0, 40, 20]},
     )
 
     try:
@@ -452,24 +551,60 @@ def test_screenshot_verifier_checks_image_and_window_identity(monkeypatch: pytes
         monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(GetForegroundWindow=lambda: 456))
         changed_window = verify_desktop_inspection(tool_result)
         assert changed_window.passed is False
+        monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(GetForegroundWindow=lambda: 123))
+        wrong_bounds_result = tool_result.model_copy(update={"output": {**tool_result.output, "window_rect": [0, 0, 50, 20]}})
+        wrong_bounds = verify_desktop_inspection(wrong_bounds_result)
+        assert wrong_bounds.passed is False
+        assert wrong_bounds.evidence["rect_dimensions_match"] is False
     finally:
         image_path.unlink(missing_ok=True)
 
 
 def test_uia_verifier_detects_window_handle_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    fresh_limits: list[int] = []
+
+    def fresh_inspection(**kwargs):
+        fresh_limits.append(kwargs["max_controls"])
+        return {"backend": "uia", "window_title": "Editor", "process_id": 55, "window_handle": 456}
+
     monkeypatch.setattr(
         "autopilot_ai.verifier.inspect_active_window",
-        lambda **kwargs: {"backend": "uia", "window_title": "Editor", "process_id": 55, "window_handle": 456},
+        fresh_inspection,
     )
     result = ToolResult(
         status="success",
-        output={"backend": "uia", "window_title": "Editor", "process_id": 55, "window_handle": 123, "controls_returned": 1},
+        output={
+            "backend": "uia", "window_title": "Editor", "process_id": 55, "window_handle": 123,
+            "controls": [{"name": "Save", "control_type": "Button", "automation_id": "save"}],
+            "controls_returned": 1, "controls_limit": 7, "controls_skipped": 0, "controls_truncated": False,
+        },
     )
 
     verification = verify_desktop_inspection(result)
 
     assert verification.passed is False
     assert verification.evidence["fresh_window_handle"] == 456
+    assert fresh_limits == [7]
+
+
+def test_uia_verifier_rejects_inconsistent_control_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = ToolResult(
+        status="success",
+        output={
+            "backend": "uia", "window_title": "Editor", "process_id": 55, "window_handle": 123,
+            "controls": [{"name": "Save", "control_type": "Button", "automation_id": "save"}],
+            "controls_returned": 2, "controls_limit": 7, "controls_skipped": 0, "controls_truncated": False,
+        },
+    )
+    monkeypatch.setattr(
+        "autopilot_ai.verifier.inspect_active_window",
+        lambda **kwargs: pytest.fail("Malformed output must be rejected before a fresh UIA read."),
+    )
+
+    verification = verify_desktop_inspection(result)
+
+    assert verification.passed is False
+    assert "inconsistent control list" in verification.summary
 
 
 def test_uia_inspects_the_foreground_window_handle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -508,6 +643,90 @@ def test_uia_inspects_the_foreground_window_handle(monkeypatch: pytest.MonkeyPat
     assert observed["window_title"] == "Dialog"
     assert observed["window_handle"] == 5678
     assert observed["controls"][0]["name"] == "OK"
+
+
+def test_uia_reports_skipped_controls_separately_from_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    def control(name: str | None, control_type: str | None = "Button"):
+        return types.SimpleNamespace(
+            element_info=types.SimpleNamespace(control_type=control_type, automation_id=""),
+            window_text=lambda: name or "",
+        )
+
+    class Unreadable:
+        @property
+        def element_info(self):
+            raise RuntimeError("not available")
+
+    class Window:
+        def wrapper_object(self):
+            return self
+
+        def window_text(self):
+            return "Editor"
+
+        def descendants(self):
+            return [control("Save"), control("", ""), Unreadable(), control("Open")]
+
+        def process_id(self):
+            return 42
+
+    class Desktop:
+        def __init__(self, backend: str):
+            pass
+
+        def window(self, handle: int):
+            return Window()
+
+    monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(GetForegroundWindow=lambda: 5678))
+    monkeypatch.setitem(sys.modules, "pywinauto", types.SimpleNamespace(Desktop=Desktop))
+
+    observed = _inspect_uia(10)
+
+    assert observed["controls_returned"] == 2
+    assert observed["controls_examined"] == 4
+    assert observed["controls_skipped"] == 2
+    assert observed["controls_truncated"] is False
+    assert observed["controls_limit"] == 10
+
+
+def test_uia_marks_control_limit_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    controls = [
+        types.SimpleNamespace(
+            element_info=types.SimpleNamespace(control_type="Button", automation_id=""),
+            window_text=lambda: "Button",
+        )
+        for _ in range(3)
+    ]
+
+    class Window:
+        def wrapper_object(self):
+            return self
+
+        def window_text(self):
+            return "Editor"
+
+        def descendants(self):
+            return controls
+
+        def process_id(self):
+            return 42
+
+    class Desktop:
+        def __init__(self, backend: str):
+            pass
+
+        def window(self, handle: int):
+            return Window()
+
+    monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(GetForegroundWindow=lambda: 5678))
+    monkeypatch.setitem(sys.modules, "pywinauto", types.SimpleNamespace(Desktop=Desktop))
+
+    observed = _inspect_uia(1)
+
+    assert observed["controls_returned"] == 1
+    assert observed["controls_examined"] == 1
+    assert observed["controls_skipped"] == 0
+    assert observed["controls_truncated"] is True
 
 
 def test_desktop_delay_waits_before_inspection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -555,10 +774,23 @@ def test_mutating_tool_is_never_retried_after_verification_failure(tmp_path: Pat
 def test_recovery_does_not_retry_incomplete_search_or_http_client_error() -> None:
     incomplete_search = ToolResult(status="success", output={"complete": False})
     failed_verification = Verification(passed=False, summary="incomplete")
-    browser_404 = ToolResult(status="error", error_code="browser_error", output={"detail": "The page returned HTTP 404."})
 
     assert should_retry("search_files", incomplete_search, failed_verification, 1) is False
-    assert should_retry("open_webpage", browser_404, failed_verification, 1) is False
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "The page returned HTTP 404.",
+        "The website returned HTTP 401 (Unauthorized). It may require sign-in.",
+        "The website returned HTTP 403 (Forbidden). It may block automated access.",
+    ],
+)
+def test_recovery_does_not_retry_any_browser_http_client_error(detail: str) -> None:
+    browser_client_error = ToolResult(status="error", error_code="browser_error", output={"detail": detail})
+    failed_verification = Verification(passed=False, summary="navigation failed")
+
+    assert should_retry("open_webpage", browser_client_error, failed_verification, 1) is False
 
 
 def test_exact_filename_search_spans_all_approved_roots(tmp_path: Path) -> None:
@@ -674,6 +906,43 @@ def test_search_entry_limit_is_explicitly_incomplete(tmp_path: Path, monkeypatch
     assert result.output["entries_scanned"] == 100_000
 
 
+def test_search_skips_symlink_files_and_directories_without_following_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    real_match = workspace / "report-real.txt"
+    outside_file = outside / "report-outside.txt"
+    real_match.write_text("inside", encoding="utf-8")
+    outside_file.write_text("outside", encoding="utf-8")
+    real_is_symlink = Path.is_symlink
+    simulated_links = {"report-link.txt", "outside-link"}
+
+    def is_symlink(path: Path) -> bool:
+        return path.name in simulated_links or real_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", is_symlink)
+    monkeypatch.setattr(
+        "autopilot_ai.tools.os.walk",
+        lambda root, topdown=True, onerror=None, followlinks=False: iter(
+            [(str(root), ["outside-link"], ["report-link.txt", "report-real.txt"])]
+        ),
+    )
+
+    report = run_goal("Find files containing report", workspace)
+
+    output = report["tool_result"]["output"]
+    assert report["status"] == "partially_completed"
+    assert output["matches"] == [str(real_match.resolve())]
+    assert output["complete"] is False
+    assert any("Skipped symlink file" in error for error in output["errors"])
+    assert any("Skipped symlink directory" in error for error in output["errors"])
+    assert report["verification"]["passed"] is False
+    assert report["verification"]["evidence"]["fresh_matches"] == [str(real_match.resolve())]
+
+
 def test_unknown_tool_is_denied(tmp_path: Path) -> None:
     result = ToolRegistry(PathPolicy(tmp_path)).execute("run_shell", {"command": "whoami"})
     assert result.status == "denied"
@@ -726,6 +995,10 @@ def test_missing_required_details_request_clarification(tmp_path: Path, goal: st
         ("Duplicate file source.txt to backup.txt", "copy_file", {"source_path": "source.txt", "destination_path": "backup.txt"}),
         ("Open the website https://example.com", "open_webpage", {"url": "https://example.com"}),
         ("Browse https://example.com", "open_webpage", {"url": "https://example.com"}),
+        ("Find me a file named report.pdf", "search_files", {"path": ".", "query": "report.pdf", "match_mode": "exact", "max_results": 100}),
+        ("Search for the file called report.pdf", "search_files", {"path": ".", "query": "report.pdf", "match_mode": "exact", "max_results": 100}),
+        ("Locate report.pdf on my computer", "search_files", {"path": ".", "query": "report.pdf", "match_mode": "exact", "max_results": 100}),
+        ("Find files containing budget in this folder", "search_files", {"path": ".", "query": "budget", "match_mode": "contains", "max_results": 100}),
     ],
 )
 def test_common_paraphrases_keep_the_same_bounded_tool_intent(goal: str, tool_name: str, expected_arguments: dict) -> None:
@@ -733,6 +1006,27 @@ def test_common_paraphrases_keep_the_same_bounded_tool_intent(goal: str, tool_na
 
     assert plan.tool_name == tool_name
     assert plan.arguments == expected_arguments
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Find me a file named report.pdf",
+        "Search for the file called report.pdf",
+        "Locate report.pdf on my computer",
+    ],
+)
+def test_search_paraphrases_find_and_verify_exact_filename(tmp_path: Path, goal: str) -> None:
+    target = tmp_path / "nested" / "report.pdf"
+    target.parent.mkdir()
+    target.write_bytes(b"sample")
+
+    report = run_goal(goal, tmp_path)
+
+    assert report["status"] == "completed"
+    assert report["plan"]["arguments"]["query"] == "report.pdf"
+    assert report["tool_result"]["output"]["matches"] == [str(target.resolve())]
+    assert report["verification"]["passed"] is True
 
 
 def test_ollama_planner_returns_validated_registered_tool(monkeypatch: pytest.MonkeyPatch) -> None:

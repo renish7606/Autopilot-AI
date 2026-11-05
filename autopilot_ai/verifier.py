@@ -178,17 +178,61 @@ def verify_webpage_open(result: ToolResult, requested_url: str) -> Verification:
     if result.status != "success":
         return Verification(passed=False, summary="Browser navigation did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})
     observed = result.output
-    required = (isinstance(observed.get("url"), str), isinstance(observed.get("title"), str), isinstance(observed.get("text"), str), isinstance(observed.get("http_status"), int))
+    required = (
+        observed.get("requested_url") == requested_url,
+        isinstance(observed.get("url"), str),
+        isinstance(observed.get("title"), str),
+        isinstance(observed.get("text"), str) and bool(observed.get("text", "").strip()),
+        isinstance(observed.get("http_status"), int),
+    )
     if not all(required) or not 200 <= observed.get("http_status", 0) < 400:
-        return Verification(passed=False, summary="Browser output did not contain a valid successful page response.")
+        return Verification(
+            passed=False,
+            summary="Browser output did not match the requested URL or contain a valid successful page response.",
+            evidence={
+                "requested_url": requested_url,
+                "reported_requested_url": observed.get("requested_url"),
+                "http_status": observed.get("http_status"),
+            },
+        )
     try:
         fresh = open_webpage(requested_url)
     except Exception as exc:
         return Verification(passed=False, summary="A fresh browser load could not independently verify the page.", evidence={"error": str(exc)})
+    if (
+        not isinstance(fresh, dict)
+        or fresh.get("requested_url") != requested_url
+        or not isinstance(fresh.get("url"), str)
+        or not isinstance(fresh.get("title"), str)
+        or not isinstance(fresh.get("text"), str)
+        or not isinstance(fresh.get("http_status"), int)
+    ):
+        return Verification(
+            passed=False,
+            summary="The fresh browser result did not contain a valid page observation.",
+            evidence={"requested_url": requested_url, "fresh_observation": fresh},
+        )
     same_url = fresh["url"].rstrip("/").casefold() == observed["url"].rstrip("/").casefold()
     same_title = fresh["title"] == observed["title"]
-    passed = 200 <= fresh["http_status"] < 400 and same_url and same_title
-    return Verification(passed=passed, summary="Page load independently verified in a fresh browser context." if passed else "A fresh page load differed from the original navigation.", evidence={"first_url": observed["url"], "fresh_url": fresh["url"], "first_title": observed["title"], "fresh_title": fresh["title"], "fresh_http_status": fresh["http_status"], "url_matches": same_url, "title_matches": same_title})
+    same_status = fresh["http_status"] == observed["http_status"]
+    visible_text_present = bool(fresh["text"].strip()) and bool(observed["text"].strip())
+    passed = 200 <= fresh["http_status"] < 400 and same_url and same_status and visible_text_present
+    return Verification(
+        passed=passed,
+        summary="Page load independently verified in a fresh browser context." if passed else "A fresh page load differed from the original navigation or contained no visible text.",
+        evidence={
+            "first_url": observed["url"],
+            "fresh_url": fresh["url"],
+            "first_title": observed["title"],
+            "fresh_title": fresh["title"],
+            "first_http_status": observed["http_status"],
+            "fresh_http_status": fresh["http_status"],
+            "url_matches": same_url,
+            "title_matches": same_title,
+            "status_matches": same_status,
+            "visible_text_present": visible_text_present,
+        },
+    )
 
 
 def verify_desktop_inspection(result: ToolResult) -> Verification:
@@ -196,8 +240,46 @@ def verify_desktop_inspection(result: ToolResult) -> Verification:
         return Verification(passed=False, summary="Desktop inspection did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})
     output = result.output
     if output.get("backend") == "uia":
+        controls = output.get("controls")
+        controls_returned = output.get("controls_returned")
+        controls_limit = output.get("controls_limit", 60)
+        controls_skipped = output.get("controls_skipped", 0)
+        controls_truncated = output.get("controls_truncated")
+        controls_valid = (
+            isinstance(controls, list)
+            and isinstance(controls_returned, int)
+            and not isinstance(controls_returned, bool)
+            and controls_returned == len(controls)
+            and isinstance(controls_limit, int)
+            and not isinstance(controls_limit, bool)
+            and 1 <= controls_limit <= 100
+            and controls_returned <= controls_limit
+            and isinstance(controls_skipped, int)
+            and not isinstance(controls_skipped, bool)
+            and controls_skipped >= 0
+            and isinstance(controls_truncated, bool)
+            and all(
+                isinstance(control, dict)
+                and isinstance(control.get("name"), str)
+                and isinstance(control.get("control_type"), str)
+                and isinstance(control.get("automation_id"), str)
+                for control in controls
+            )
+        )
+        if not controls_valid:
+            return Verification(
+                passed=False,
+                summary="UI Automation returned a malformed or inconsistent control list.",
+                evidence={
+                    "controls_returned": controls_returned,
+                    "actual_control_count": len(controls) if isinstance(controls, list) else None,
+                    "controls_limit": controls_limit,
+                    "controls_skipped": controls_skipped,
+                    "controls_truncated": controls_truncated,
+                },
+            )
         try:
-            fresh = inspect_active_window(max_controls=output.get("controls_returned", 60), screenshot_fallback=False)
+            fresh = inspect_active_window(max_controls=controls_limit, screenshot_fallback=False)
         except DesktopToolError as exc:
             return Verification(passed=False, summary="A fresh UI Automation read could not verify the window.", evidence={"error": str(exc)})
         same_window = (
@@ -216,6 +298,10 @@ def verify_desktop_inspection(result: ToolResult) -> Verification:
                 "process_id": output.get("process_id"),
                 "fresh_process_id": fresh.get("process_id"),
                 "same_window": same_window,
+                "controls_returned": controls_returned,
+                "controls_skipped": controls_skipped,
+                "controls_truncated": controls_truncated,
+                "controls_limit": controls_limit,
             },
         )
     if output.get("backend") == "pyautogui_screenshot":
@@ -230,6 +316,15 @@ def verify_desktop_inspection(result: ToolResult) -> Verification:
         except (OSError, ValueError, ImportError) as exc:
             return Verification(passed=False, summary="The saved screenshot could not be independently opened.", evidence={"screenshot_path": str(path), "error": str(exc)})
         dimensions_match = width == output.get("width") and height == output.get("height")
+        rect = output.get("window_rect")
+        rect_valid = (
+            isinstance(rect, list)
+            and len(rect) == 4
+            and all(isinstance(value, int) and not isinstance(value, bool) for value in rect)
+            and rect[2] > rect[0]
+            and rect[3] > rect[1]
+        )
+        rect_dimensions_match = rect_valid and width == rect[2] - rect[0] and height == rect[3] - rect[1]
         try:
             import win32gui
 
@@ -237,8 +332,8 @@ def verify_desktop_inspection(result: ToolResult) -> Verification:
         except Exception as exc:
             return Verification(passed=False, summary="The active window could not be rechecked after screenshot capture.", evidence={"screenshot_path": str(path), "error": str(exc)})
         same_window = active_handle != 0 and active_handle == output.get("window_handle")
-        passed = dimensions_match and same_window
-        summary = "Active-window screenshot independently verified." if passed else "Screenshot dimensions or active-window identity changed before verification."
+        passed = dimensions_match and rect_dimensions_match and same_window
+        summary = "Active-window screenshot independently verified." if passed else "Screenshot dimensions, captured window bounds, or active-window identity could not be verified."
         return Verification(
             passed=passed,
             summary=summary,
@@ -247,6 +342,8 @@ def verify_desktop_inspection(result: ToolResult) -> Verification:
                 "width": width,
                 "height": height,
                 "dimensions_match": dimensions_match,
+                "window_rect": rect,
+                "rect_dimensions_match": rect_dimensions_match,
                 "captured_window_handle": output.get("window_handle"),
                 "fresh_window_handle": active_handle,
                 "same_window": same_window,

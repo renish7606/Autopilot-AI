@@ -87,12 +87,19 @@ def plan_goal(goal: str) -> PlanStep:
         query = quoted_name if quoted else (basename if looks_like_filename else "")
         if not query:
             match = re.search(
-                r"\b(?:search|find|look for|locate)\s+(?:files?\s+)?(?:named|called|containing|with|for)?\s*(.+)",
+                r"\b(?:search(?:\s+for)?|find|look\s+for|locate)\s+(?:me\s+)?"
+                r"(?:(?:the|a|any)\s+)?(?:files?\s+)?"
+                r"(?:(?:named|called|containing|filename|with\s+(?:the\s+)?(?:file\s+)?name|for)\s+)?(.+)",
                 goal,
                 flags=re.IGNORECASE,
             )
             query = match.group(1).strip() if match else ""
-            query = re.split(r"\s+in (?:this|the) (?:workspace|folder|directory)\b", query, flags=re.IGNORECASE)[0]
+            query = re.split(
+                r"\s+(?:in\s+(?:this|the|my)\s+(?:workspace|folder|directory|computer|files)|"
+                r"on\s+my\s+computer|across\s+my\s+computer)\b",
+                query,
+                flags=re.IGNORECASE,
+            )[0]
             query = re.sub(r"[?.!]+$", "", query).strip()
         if not query or query.casefold().strip(" .!?") in {"file", "files", "a file", "a files", "named", "called", "containing", "with", "for"}:
             raise ClarificationRequired("What filename or part of a filename should I search for?")

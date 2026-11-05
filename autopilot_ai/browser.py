@@ -25,6 +25,9 @@ class BrowserPolicyError(BrowserToolError):
     pass
 
 
+_NAVIGATION_TIMEOUT_MS = 20_000
+
+
 def _http_status_error(status: int) -> str:
     if status in (401, 403):
         return (
@@ -88,21 +91,24 @@ def open_webpage(url: str) -> dict:
         try:
             context = browser.new_context(accept_downloads=False, java_script_enabled=True)
             page = context.new_page()
+            blocked_requests: list[str] = []
 
             def guard_request(route) -> None:
                 if route.request.method not in ("GET", "HEAD"):
+                    blocked_requests.append("method")
                     route.abort()
                     return
                 try:
                     _validate_public_url(route.request.url, dns_cache)
                 except BrowserToolError:
+                    blocked_requests.append("destination")
                     route.abort()
                 else:
                     route.continue_()
 
             page.route("**/*", guard_request)
             try:
-                response = page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                response = page.goto(url, wait_until="domcontentloaded", timeout=_NAVIGATION_TIMEOUT_MS)
                 if response is None:
                     raise BrowserToolError("The browser did not receive an HTTP response.")
                 status = response.status
@@ -110,9 +116,25 @@ def open_webpage(url: str) -> dict:
                     raise BrowserToolError(_http_status_error(status))
                 title = page.title()
                 text = page.locator("body").inner_text(timeout=5_000)
+                if blocked_requests:
+                    raise BrowserPolicyError(
+                        "The page attempted a browser request that AutoPilot blocked. "
+                        "Only public HTTP/HTTPS GET and HEAD requests are allowed."
+                    )
             except PlaywrightTimeoutError as exc:
-                raise BrowserToolError("The page did not finish loading within 20 seconds.") from exc
+                timeout_seconds = _NAVIGATION_TIMEOUT_MS / 1000
+                raise BrowserToolError(f"The page did not finish loading within {timeout_seconds:g} seconds.") from exc
             except PlaywrightError as exc:
+                if blocked_requests:
+                    raise BrowserPolicyError(
+                        "The page attempted a browser request that AutoPilot blocked. "
+                        "Only public HTTP/HTTPS GET and HEAD requests are allowed."
+                    ) from exc
+                if "ERR_NETWORK_ACCESS_DENIED" in str(exc) or "ERR_BLOCKED_BY_CLIENT" in str(exc):
+                    raise BrowserPolicyError(
+                        "The page attempted a browser request that AutoPilot blocked. "
+                        "Only public HTTP/HTTPS GET and HEAD requests are allowed."
+                    ) from exc
                 raise BrowserToolError(f"Browser navigation failed: {exc}") from exc
             final_url = _validate_public_url(page.url, dns_cache)
             return {"requested_url": url, "url": final_url, "http_status": status, "title": title[:500], "text": text[:4000], "text_truncated": len(text) > 4000}

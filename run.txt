@@ -40,9 +40,10 @@ $env:AUTOPILOT_RUN_OLLAMA_INTEGRATION = "1"
 python -m pytest tests/test_integration.py::test_live_ollama_plan_is_used_only_when_it_matches_intent -v
 
 # Optional: read the live foreground window. Run from an unlocked interactive
-# Windows desktop with an application window in the foreground.
+# Windows desktop. The same group also checks a real exclusively locked file;
+# UIA and screenshot cases skip automatically if there is no foreground window.
 $env:AUTOPILOT_RUN_WINDOWS_INTEGRATION = "1"
-python -m pytest tests/test_integration.py::test_real_windows_uia_reads_foreground_window -v
+python -m pytest tests/test_integration.py -m windows_integration -v -rs
 
 # Remove opt-in flags from this PowerShell window when finished (optional).
 Remove-Item Env:AUTOPILOT_RUN_BROWSER_INTEGRATION -ErrorAction SilentlyContinue

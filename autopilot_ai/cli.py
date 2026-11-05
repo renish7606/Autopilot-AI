@@ -126,6 +126,10 @@ def format_report(report: dict) -> str:
             elif plan.get("tool_name") == "inspect_active_window":
                 if output.get("backend") == "uia":
                     lines.append(f"  Window: {output.get('window_title', '(untitled)')}; {output.get('controls_returned', 0)} controls read.")
+                    if output.get("controls_skipped"):
+                        lines.append(f"  {output['controls_skipped']} control(s) could not be read or had no visible label/type.")
+                    if output.get("controls_truncated"):
+                        lines.append(f"  Control list limited to {output.get('controls_limit', output.get('controls_returned', 0))}; more controls were available.")
                     controls = output.get("controls", [])
                     named_controls = [
                         f"{control.get('name') or '(unnamed)'} [{control.get('control_type') or 'control'}]"
@@ -139,6 +143,8 @@ def format_report(report: dict) -> str:
                         lines.append("  More controls were available; use --debug for the complete structured result.")
                 else:
                     lines.append(f"  Active-window screenshot saved to: {output.get('screenshot_path', '(not available)')}")
+                    if output.get("uia_note"):
+                        lines.append(f"  UI Automation could not read the window: {output['uia_note']}")
             verification = item.get("verification", {})
             if verification:
                 label = "passed" if verification.get("passed") else "failed"

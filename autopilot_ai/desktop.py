@@ -25,15 +25,19 @@ def _inspect_uia(max_controls: int) -> dict:
         window = Desktop(backend="uia").window(handle=handle).wrapper_object()
         title = window.window_text()
         controls = []
+        controls_skipped = 0
         elements = window.descendants()
+        elements_examined = 0
         for element in elements:
             if len(controls) >= max_controls:
                 break
+            elements_examined += 1
             try:
                 info = element.element_info
                 name = element.window_text().strip()
                 control_type = str(info.control_type or "")
                 if not name and not control_type:
+                    controls_skipped += 1
                     continue
                 controls.append({
                     "name": name[:300],
@@ -41,6 +45,7 @@ def _inspect_uia(max_controls: int) -> dict:
                     "automation_id": str(info.automation_id or "")[:100],
                 })
             except Exception:
+                controls_skipped += 1
                 continue
         return {
             "backend": "uia",
@@ -49,7 +54,10 @@ def _inspect_uia(max_controls: int) -> dict:
             "window_handle": int(handle),
             "controls": controls,
             "controls_returned": len(controls),
-            "controls_truncated": len(elements) > len(controls),
+            "controls_limit": max_controls,
+            "controls_examined": elements_examined,
+            "controls_skipped": controls_skipped,
+            "controls_truncated": elements_examined < len(elements),
         }
     except Exception as exc:
         raise DesktopToolError(f"Windows UI Automation could not inspect the active window: {exc}") from exc
@@ -58,6 +66,7 @@ def _inspect_uia(max_controls: int) -> dict:
 def _capture_screenshot() -> dict:
     try:
         import win32gui
+        import win32process
         import pyautogui
     except ImportError as exc:
         raise DesktopToolError("PyAutoGUI and pywin32 are required for active-window screenshot fallback.") from exc
@@ -76,7 +85,7 @@ def _capture_screenshot() -> dict:
         if width <= 0 or height <= 0:
             raise DesktopToolError("The active window is not visible on the primary display.")
         title = str(win32gui.GetWindowText(handle) or "")[:500]
-        _, process_id = win32gui.GetWindowThreadProcessId(handle)
+        _, process_id = win32process.GetWindowThreadProcessId(handle)
     except DesktopToolError:
         raise
     except Exception as exc:
