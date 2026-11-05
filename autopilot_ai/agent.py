@@ -141,7 +141,14 @@ def run_goal(
             elif step.tool_name == "list_directory":
                 verification = verify_directory_listing(result, target)
             elif step.tool_name == "search_files":
-                verification = verify_file_search(result, search_targets or [target], step.arguments.get("query", ""), step.arguments.get("match_mode", "exact"), step.arguments.get("max_results", 100))
+                verification = verify_file_search(
+                    result,
+                    search_targets or [target],
+                    step.arguments.get("query", ""),
+                    step.arguments.get("match_mode", "exact"),
+                    step.arguments.get("max_results", 100),
+                    step.arguments.get("extensions", []),
+                )
             else:
                 return {"status": "denied", "goal": goal, "message": "No verifier is registered for the selected tool."}
             attempt_history.append({

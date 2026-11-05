@@ -7,6 +7,7 @@ import hashlib
 from .contracts import ToolResult, Verification
 from .browser import open_webpage
 from .desktop import DesktopToolError, inspect_active_window
+from .filename_matching import matches_filename
 
 
 def verify_directory_listing(result: ToolResult, directory: Path) -> Verification:
@@ -57,8 +58,9 @@ def verify_file_search(
     query: str,
     match_mode: str,
     max_results: int,
+    extensions: list[str] | None = None,
 ) -> Verification:
-    """Repeat an exact/substring filename scan across every approved root."""
+    """Repeat a deterministic filename or extension scan across approved roots."""
     if result.status != "success":
         return Verification(passed=False, summary="Search tool did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})
 
@@ -67,6 +69,7 @@ def verify_file_search(
         return Verification(passed=False, summary="Search tool output did not contain a valid match list.")
 
     needle = query.casefold().strip()
+    extensions = [extension.casefold() for extension in (extensions or [])]
     fresh: list[str] = []
     seen_matches: set[str] = set()
     scan_errors: list[str] = []
@@ -94,8 +97,7 @@ def verify_file_search(
                 if candidate.is_symlink():
                     scan_errors.append(f"Skipped symlink file: {candidate}")
                     continue
-                folded_name = name.casefold()
-                matched = folded_name == needle if match_mode == "exact" else needle in folded_name
+                matched = matches_filename(name, needle, match_mode, extensions)
                 if not matched:
                     continue
                 full_path = str(candidate.resolve())
@@ -119,6 +121,7 @@ def verify_file_search(
     output_consistent = (
         result.output.get("query") == query
         and result.output.get("match_mode") == match_mode
+        and result.output.get("extensions", []) == extensions
         and result.output.get("roots") == [str(root) for root in roots]
         and result.output.get("count") == len(observed)
         and result.output.get("truncated") == truncated

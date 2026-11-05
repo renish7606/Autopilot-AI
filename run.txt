@@ -112,6 +112,11 @@ python -m autopilot_ai.cli "Find source-check.txt" --planner heuristic
 # Partial filename search (filenames only, not document contents):
 python -m autopilot_ai.cli "Find files containing source" --planner heuristic
 
+# Search by file suffix across approved roots (never reads file contents):
+python -m autopilot_ai.cli "Find PDFs" --planner heuristic
+python -m autopilot_ai.cli "Search for DOCX files in approved folders" --planner heuristic
+python -m autopilot_ai.cli "Find images" --planner heuristic
+
 # Inspect persistent search folders:
 python -m autopilot_ai.cli --list-approved-dirs
 

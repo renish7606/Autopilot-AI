@@ -23,6 +23,60 @@ class ModelPlannerError(RuntimeError):
     """The local model could not provide a safe, usable structured plan."""
 
 
+_FILE_TYPE_EXTENSIONS = {
+    "pdf": [".pdf"],
+    "pdfs": [".pdf"],
+    "pdf file": [".pdf"],
+    "pdf files": [".pdf"],
+    "pdf document": [".pdf"],
+    "pdf documents": [".pdf"],
+    "docx": [".docx"],
+    "docx file": [".docx"],
+    "docx files": [".docx"],
+    "docx document": [".docx"],
+    "docx documents": [".docx"],
+    "word document": [".doc", ".docx"],
+    "word documents": [".doc", ".docx"],
+    "image": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"],
+    "images": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"],
+    "image file": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"],
+    "image files": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"],
+    "picture": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"],
+    "pictures": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"],
+    "photos": [".jpg", ".jpeg", ".png", ".heic", ".webp"],
+}
+
+
+def _requested_extensions(goal: str) -> list[str] | None:
+    """Resolve an explicit file-type request without asking the LLM to guess."""
+    command = re.fullmatch(
+        r"(?:please\s+)?(?:find|search(?:\s+for)?|locate|list|show(?:\s+me)?)\s+(.+?)\s*[?.!]*",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    )
+    if not command:
+        return None
+    target = command.group(1).strip().casefold()
+    target = re.split(
+        r"\s+(?:in|under|within)\s+(?:(?:my|the|this)\s+)?(?:approved\s+)?(?:folders?|directories|locations|workspace|computer)\b",
+        target,
+        maxsplit=1,
+    )[0].strip()
+    target = re.sub(r"^(?:all|any|the)\s+", "", target)
+    if target in _FILE_TYPE_EXTENSIONS:
+        return _FILE_TYPE_EXTENSIONS[target]
+    target = re.sub(r"\s+files?$", "", target).strip()
+    if target in _FILE_TYPE_EXTENSIONS:
+        return _FILE_TYPE_EXTENSIONS[target]
+    explicit_extension = re.fullmatch(r"(?:files?\s+with\s+(?:the\s+)?extension\s+|extension\s+)?\.([a-z0-9]{1,10})", target)
+    if explicit_extension:
+        return [f".{explicit_extension.group(1)}"]
+    named_extension = re.fullmatch(r"(?:files?\s+with\s+(?:the\s+)?extension\s+|extension\s+)([a-z0-9]{1,10})", target)
+    if named_extension:
+        return [f".{named_extension.group(1)}"]
+    return None
+
+
 def plan_goal(goal: str) -> PlanStep:
     """Map a narrow file-listing request to a typed tool call.
 
@@ -61,6 +115,17 @@ def plan_goal(goal: str) -> PlanStep:
         return PlanStep(step_id="step-1", description="Copy a file within approved directories without overwriting an existing destination.", tool_name="copy_file", arguments={"source_path": source, "destination_path": destination}, expected_result="The copied file has the same size and SHA-256 digest as its source.", risk_level="medium", requires_approval=True)
     if normalized.startswith(("copy ", "duplicate ")):
         raise ClarificationRequired("Which source file should I copy, and what destination path should I use?")
+    requested_extensions = _requested_extensions(goal)
+    if requested_extensions:
+        return PlanStep(
+            step_id="step-1",
+            description="Search approved directories for files with the requested extension.",
+            tool_name="search_files",
+            arguments={"path": ".", "query": "", "match_mode": "exact", "extensions": requested_extensions, "max_results": 100},
+            expected_result="An independent filename scan confirms all matching file extensions under approved roots.",
+            risk_level="low",
+            requires_approval=False,
+        )
     raw_filename = goal.strip().strip(" \t\r\n\"'")
     basename = re.split(r"[\\/]", raw_filename)[-1]
     filename_with_extension = bool(re.fullmatch(r"[^<>:\"|?*]+\.[A-Za-z0-9]{1,16}", basename))
@@ -197,7 +262,8 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
         "list_directory lists immediate entries in the primary approved workspace. "
         "search_files searches filenames across explicitly approved roots; never search contents. Use relative path '.'. "
         "For exact filename search use query equal to the filename and match_mode='exact'; for a requested partial name use "
-        "match_mode='contains'. Include EVERY requested action; do not omit an action or combine actions into one step. "
+        "match_mode='contains'. For file-type search, use query='' and the exact extensions list requested by the user; "
+        "images map only to the predefined image suffix set. Include EVERY requested action; do not omit an action or combine actions into one step. "
         "Preserve the user's order. Use arguments key 'path', never 'root'. "
         "Example: 'Show files and then find report.pdf' requires exactly two steps: first list_directory with arguments {path:'.'}, "
         "then search_files with arguments {path:'.', query:'report.pdf', match_mode:'exact', max_results:100}. "

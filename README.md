@@ -58,6 +58,16 @@ To search filenames recursively:
 python -m autopilot_ai.cli "Find files containing budget"
 ```
 
+To find files by extension in the workspace and approved search folders:
+
+```powershell
+python -m autopilot_ai.cli "Find PDFs" --planner heuristic
+python -m autopilot_ai.cli "Search for DOCX files in approved folders" --planner heuristic
+python -m autopilot_ai.cli "Find images" --planner heuristic
+```
+
+Extension search matches filename suffixes only; it does not inspect file contents. Image search currently includes PNG, JPG/JPEG, GIF, BMP, WEBP, TIF/TIFF, SVG, and HEIC files. Results stay within the configured approved roots.
+
 To open a public web page and inspect its visible text:
 
 ```powershell

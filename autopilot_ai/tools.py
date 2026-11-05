@@ -3,14 +3,16 @@
 from pathlib import Path
 import os
 import hashlib
+import re
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .browser import BrowserPolicyError, BrowserToolError, OpenWebpageArgs, open_webpage
 from .contracts import ToolResult
 from .desktop import DesktopToolError, inspect_active_window
+from .filename_matching import matches_filename
 from .policy import PathPolicy
 
 
@@ -24,9 +26,24 @@ class SearchFilesArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(default=".", min_length=1, max_length=300)
-    query: str = Field(min_length=1, max_length=200)
+    query: str = Field(default="", max_length=200)
     match_mode: Literal["exact", "contains"] = "exact"
+    extensions: list[str] = Field(default_factory=list, max_length=16)
     max_results: int = Field(default=100, ge=1, le=500)
+
+    @field_validator("extensions")
+    @classmethod
+    def normalize_extensions(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for extension in value:
+            item = extension.strip().casefold()
+            if not item.startswith("."):
+                item = f".{item}"
+            if not re.fullmatch(r"\.[a-z0-9]{1,10}", item):
+                raise ValueError("Extensions must be simple suffixes such as .pdf or .docx.")
+            if item not in normalized:
+                normalized.append(item)
+        return normalized
 
 
 class CreateDirectoryArgs(BaseModel):
@@ -140,9 +157,11 @@ def _search_files(
     query: str,
     match_mode: str,
     max_results: int,
+    extensions: list[str],
 ) -> dict[str, Any]:
     needle = query.casefold().strip()
-    if not needle:
+    extensions = [extension.casefold() for extension in extensions]
+    if not needle and not extensions:
         raise ToolError("Search query must contain at least one non-space character.")
 
     matches: list[str] = []
@@ -176,8 +195,7 @@ def _search_files(
                 if candidate.is_symlink():
                     errors.append(f"Skipped symlink file: {candidate}")
                     continue
-                folded_name = name.casefold()
-                matched = folded_name == needle if match_mode == "exact" else needle in folded_name
+                matched = matches_filename(name, needle, match_mode, extensions)
                 if not matched:
                     continue
                 full_path = str(candidate.resolve())
@@ -197,6 +215,7 @@ def _search_files(
     return {
         "query": query,
         "match_mode": match_mode,
+        "extensions": extensions,
         "roots": roots,
         "matches": matches,
         "count": len(matches),

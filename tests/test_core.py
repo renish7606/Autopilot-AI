@@ -1029,6 +1029,86 @@ def test_search_paraphrases_find_and_verify_exact_filename(tmp_path: Path, goal:
     assert report["verification"]["passed"] is True
 
 
+@pytest.mark.parametrize(
+    ("goal", "extensions"),
+    [
+        ("Find PDFs", [".pdf"]),
+        ("Find all PDF files in approved folders", [".pdf"]),
+        ("Search for DOCX files in my approved directories", [".docx"]),
+        ("Find images", [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"]),
+        ("Find files with extension .md", [".md"]),
+        ("Show me word documents", [".doc", ".docx"]),
+    ],
+)
+def test_extension_search_phrasings_are_deterministic(goal: str, extensions: list[str]) -> None:
+    plan = plan_goal_steps(goal)[0]
+
+    assert plan.tool_name == "search_files"
+    assert plan.arguments["query"] == ""
+    assert plan.arguments["extensions"] == extensions
+
+
+def test_extension_search_is_verified_and_stays_inside_approved_roots(tmp_path: Path) -> None:
+    primary = tmp_path / "workspace"
+    extra = tmp_path / "approved-documents"
+    unapproved = tmp_path / "private"
+    for folder in (primary, extra, unapproved):
+        folder.mkdir()
+    (primary / "report.PDF").write_bytes(b"pdf")
+    (primary / "archive.pdf.backup").write_bytes(b"not a pdf suffix")
+    (primary / "photo.JPG").write_bytes(b"jpg")
+    (extra / "notes.docx").write_bytes(b"docx")
+    (unapproved / "private.pdf").write_bytes(b"private")
+
+    report = run_goal("Find PDFs", primary, approved_dirs=[extra])
+
+    expected = [str((primary / "report.PDF").resolve())]
+    assert report["status"] == "completed"
+    assert report["plan"]["arguments"]["extensions"] == [".pdf"]
+    assert report["tool_result"]["output"]["matches"] == expected
+    assert report["tool_result"]["output"]["roots"] == [str(primary.resolve()), str(extra.resolve())]
+    assert str((unapproved / "private.pdf").resolve()) not in report["tool_result"]["output"]["matches"]
+    assert report["verification"]["passed"] is True
+
+
+def test_image_extension_search_matches_multiple_suffixes(tmp_path: Path) -> None:
+    (tmp_path / "photo.png").write_bytes(b"png")
+    (tmp_path / "scan.JPEG").write_bytes(b"jpeg")
+    (tmp_path / "graphic.svg").write_text("<svg/>", encoding="utf-8")
+    (tmp_path / "archive.zip").write_bytes(b"zip")
+
+    report = run_goal("Find images", tmp_path)
+
+    matches = report["tool_result"]["output"]["matches"]
+    expected = sorted(
+        [str((tmp_path / name).resolve()) for name in ("photo.png", "scan.JPEG", "graphic.svg")],
+        key=str.casefold,
+    )
+    assert report["status"] == "completed"
+    assert matches == expected
+    assert report["verification"]["passed"] is True
+
+
+def test_extension_search_rejects_unapproved_roots(tmp_path: Path) -> None:
+    missing_root = tmp_path / "not-approved"
+
+    report = run_goal("Find PDFs", tmp_path, approved_dirs=[missing_root])
+
+    assert report["status"] == "denied"
+    assert "Approved directory rejected" in report["message"]
+
+
+def test_extension_search_validates_extension_values(tmp_path: Path) -> None:
+    registry = ToolRegistry(PathPolicy(tmp_path))
+
+    invalid = registry.execute("search_files", {"query": "", "extensions": ["../outside"]})
+    empty = registry.execute("search_files", {"query": "", "extensions": []})
+
+    assert invalid.status == "denied"
+    assert invalid.error_code == "invalid_arguments"
+    assert empty.status == "denied"
+
+
 def test_ollama_planner_returns_validated_registered_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     step = PlanStep(
         step_id=">'Find files containing budget',",
