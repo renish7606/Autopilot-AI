@@ -11,11 +11,13 @@ from autopilot_ai.approved_dirs import add_approved_dirs, clear_approved_dirs, l
 from autopilot_ai.agent import run_goal
 from autopilot_ai.browser import BrowserToolError, _http_status_error, open_webpage
 from autopilot_ai.cli import format_report
+from autopilot_ai.conversation import ConversationSession
 from autopilot_ai.contracts import PlanStep, TaskPlan, ToolResult, Verification
 from autopilot_ai.desktop import DesktopToolError, _capture_screenshot, _inspect_uia, inspect_active_window
 from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
 from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
+from autopilot_ai.session_state import SessionState
 from autopilot_ai.tools import ToolRegistry
 from autopilot_ai.verifier import verify_desktop_inspection, verify_directory_listing, verify_webpage_open
 
@@ -27,6 +29,73 @@ def test_natural_language_listing_runs_and_verifies(tmp_path: Path) -> None:
     assert report["status"] == "completed"
     assert report["verification"]["passed"] is True
     assert report["verification"]["evidence"]["fresh_names"] == ["sample.txt", "subfolder"]
+
+
+def test_search_output_numbers_matches_with_filename_and_full_path() -> None:
+    report = {
+        "status": "completed",
+        "goal": "Find report.pdf",
+        "plan": {"tool_name": "search_files", "description": "Search filenames."},
+        "tool_result": {"status": "success", "output": {"matches": [r"D:\\Reports\\report.pdf", r"D:\\Archive\\report.pdf"], "complete": True}},
+        "verification": {"passed": True, "summary": "verified"},
+    }
+    rendered = format_report(report)
+    assert "1) report.pdf" in rendered
+    assert r"D:\\Reports\\report.pdf" in rendered
+    assert "2) report.pdf" in rendered
+    assert r"D:\\Archive\\report.pdf" in rendered
+
+
+def test_session_state_resolves_ordinal_and_clears_after_selection() -> None:
+    state = SessionState()
+    state.set_pending("Which file did you mean?", (r"D:\\A\\report.pdf", r"D:\\B\\report.pdf"))
+
+    assert state.select_candidate("the second one") == r"D:\\B\\report.pdf"
+    assert state.pending_question is None
+    assert state.candidates == ()
+
+
+def test_session_state_keeps_context_for_invalid_reply_and_can_clear() -> None:
+    state = SessionState()
+    state.set_pending("Choose a file", ("one", "two"))
+
+    assert state.select_candidate("maybe") is None
+    assert state.pending_question == "Choose a file"
+    assert state.select_candidate("3") is None
+    state.clear()
+    assert state.pending_question is None
+    assert state.candidates == ()
+
+
+def test_conversation_retains_multiple_search_results_for_ordinal_reply() -> None:
+    session = ConversationSession()
+    report = {
+        "status": "completed",
+        "goal": "Find report.pdf",
+        "plan": {"tool_name": "search_files"},
+        "tool_result": {"status": "success", "output": {"matches": ["D:/Reports/report.pdf", "D:/Archive/report.pdf"], "complete": True}},
+        "verification": {"passed": True},
+    }
+    first_turn = session.handle("Find report.pdf", lambda _: report)
+
+    assert first_turn["follow_up_question"] == "Which search result do you mean?"
+    selected = session.handle("the second one", lambda _: pytest.fail("A result reply must not start a new task."))
+    assert selected["status"] == "candidate_selected"
+    assert selected["selected_path"] == "D:/Archive/report.pdf"
+
+
+def test_conversation_discards_stale_candidates_when_new_task_arrives() -> None:
+    session = ConversationSession()
+    multi_match_report = {
+        "status": "completed",
+        "plan": {"tool_name": "search_files"},
+        "tool_result": {"status": "success", "output": {"matches": ["one", "two"], "complete": True}},
+        "verification": {"passed": True},
+    }
+    session.handle("Find reports", lambda _: multi_match_report)
+    new_report = {"status": "unsupported", "goal": "open settings"}
+    assert session.handle("open settings", lambda goal: new_report)["status"] == "unsupported"
+    assert session.handle("the second one", lambda _: {"status": "unsupported"})["status"] == "unsupported"
 
 
 def test_directory_verifier_checks_types_sizes_path_and_count(tmp_path: Path) -> None:

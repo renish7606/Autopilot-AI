@@ -12,6 +12,7 @@ from .approved_dirs import (
     remove_approved_dirs,
 )
 from .agent import run_goal
+from .conversation import ConversationSession
 
 
 def main() -> None:
@@ -33,6 +34,7 @@ def main() -> None:
     parser.add_argument("--approve", action="store_true", help="Explicitly approve the planned filesystem change (create/copy).")
     parser.add_argument("--debug", action="store_true", help="Print the full structured JSON report, including plans and verification evidence.")
     parser.add_argument("--delay-seconds", type=int, choices=range(0, 31), default=0, help="Wait up to 30 seconds before desktop inspection so you can switch to the app to inspect.")
+    parser.add_argument("--interactive", action="store_true", help="Start a temporary conversation; numbered search results can be selected in the next turn.")
     args = parser.parse_args()
 
     managing = bool(args.approve_dir or args.unapprove_dir or args.list_approved_dirs or args.clear_approved_dirs)
@@ -40,6 +42,10 @@ def main() -> None:
         parser.error("Manage approved directories in a separate command without a task goal.")
     if sum(bool(value) for value in (args.approve_dir, args.unapprove_dir, args.list_approved_dirs, args.clear_approved_dirs)) > 1:
         parser.error("Choose one approved-directory management operation per command.")
+    if args.interactive and args.goal:
+        parser.error("Use --interactive without a task goal; enter tasks at the prompt.")
+    if args.interactive and args.approve:
+        parser.error("Interactive mode cannot pre-approve filesystem changes; approve changes with a one-shot command.")
 
     try:
         if args.approve_dir:
@@ -58,6 +64,9 @@ def main() -> None:
             roots = load_approved_dirs()
             print(json.dumps({"status": "ok", "approved_dirs": [str(path) for path in roots]}, indent=2))
             return
+        if args.interactive:
+            _run_interactive(args)
+            return
         if not args.goal:
             parser.error("Provide a natural-language task or filename, or use an approved-directory management option.")
         approved_dirs = [*load_approved_dirs(), *args.approved_dir]
@@ -68,6 +77,36 @@ def main() -> None:
     print(json.dumps(report, indent=2, ensure_ascii=True) if args.debug else format_report(report))
     if report["status"] not in ("completed", "approval_required"):
         raise SystemExit(1)
+
+
+def _run_interactive(args: argparse.Namespace) -> None:
+    """Run a transient prompt loop; all task execution still goes through run_goal."""
+    session = ConversationSession()
+    approved_dirs = [*load_approved_dirs(), *args.approved_dir]
+    print("AutoPilot conversation started. Type 'exit' or 'quit' to end; context is cleared when this process exits.")
+    while True:
+        try:
+            message = input("You> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("Conversation ended.")
+            return
+        if message.casefold() in {"exit", "quit"}:
+            print("Conversation ended.")
+            return
+        if not message:
+            continue
+        report = session.handle(
+            message,
+            lambda goal: run_goal(
+                goal,
+                args.workspace,
+                planner=args.planner,
+                approved_dirs=approved_dirs,
+                approved=args.approve,
+                desktop_delay_seconds=args.delay_seconds,
+            ),
+        )
+        print(format_selection(report) if report.get("status") == "candidate_selected" else format_report(report))
 
 
 def format_report(report: dict) -> str:
@@ -106,7 +145,9 @@ def format_report(report: dict) -> str:
             elif plan.get("tool_name") == "search_files":
                 matches = output.get("matches", [])
                 lines.append(f"  Found {len(matches)} matching file(s).")
-                lines.extend(f"  {match}" for match in matches)
+                for index, match in enumerate(matches, start=1):
+                    lines.append(f"  {index}) {Path(match).name}")
+                    lines.append(f"     {match}")
                 if output.get("complete") is False:
                     lines.append("  Warning: the search was incomplete; inspect the errors before relying on these results.")
                     for error in output.get("errors", [])[:3]:
@@ -171,6 +212,8 @@ def format_report(report: dict) -> str:
         lines.append("Next: review the planned change, then rerun the same task with --approve.")
     elif status == "clarification_required":
         lines.append(f"Question: {report.get('question', 'Please clarify the request.')}")
+    if report.get("follow_up_question"):
+        lines.append(f"Follow-up: {report['follow_up_question']} Reply with a number or ordinal (for example, 'the second one').")
     elif status == "unsupported":
         lines.append("Next: use a supported request or wait for that capability to be implemented.")
     elif status == "partially_completed":
@@ -184,6 +227,10 @@ def format_report(report: dict) -> str:
     elif status in {"failed", "denied", "error"}:
         lines.append("Next: review the error above; no success is claimed for the failed operation.")
     return "\n".join(lines)
+
+
+def format_selection(report: dict) -> str:
+    return f"Selected result: {report['selected_path']}\n{report.get('message', '')}"
 
 
 if __name__ == "__main__":

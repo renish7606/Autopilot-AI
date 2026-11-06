@@ -117,6 +117,10 @@ python -m autopilot_ai.cli "Find PDFs" --planner heuristic
 python -m autopilot_ai.cli "Search for DOCX files in approved folders" --planner heuristic
 python -m autopilot_ai.cli "Find images" --planner heuristic
 
+# Optional temporary conversation: select one of multiple filename matches
+# by replying with e.g. "the second one". Selection only prints the path.
+python -m autopilot_ai.cli --interactive --planner heuristic
+
 # Inspect persistent search folders:
 python -m autopilot_ai.cli --list-approved-dirs
 

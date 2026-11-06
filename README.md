@@ -68,6 +68,8 @@ python -m autopilot_ai.cli "Find images" --planner heuristic
 
 Extension search matches filename suffixes only; it does not inspect file contents. Image search currently includes PNG, JPG/JPEG, GIF, BMP, WEBP, TIF/TIFF, SVG, and HEIC files. Results stay within the configured approved roots.
 
+Search results in normal CLI output are numbered and show both each filename and its full path. Start `python -m autopilot_ai.cli --interactive --planner heuristic` for a temporary prompt session. After a search with multiple matches, reply with a number or ordinal such as `the second one` to select a path. Selection only identifies the result; it does not open or change the file. Session state is held in memory and is cleared when the process exits. One-shot CLI commands remain available as before.
+
 To open a public web page and inspect its visible text:
 
 ```powershell
