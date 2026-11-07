@@ -117,6 +117,10 @@ python -m autopilot_ai.cli "Find PDFs" --planner heuristic
 python -m autopilot_ai.cli "Search for DOCX files in approved folders" --planner heuristic
 python -m autopilot_ai.cli "Find images" --planner heuristic
 
+# Scope a filename or type search to a unique approved folder named ML:
+python -m autopilot_ai.cli "Show PDFs in ML" --planner heuristic
+python -m autopilot_ai.cli "Find files containing Renish_Resume in ML" --planner heuristic
+
 # Optional temporary conversation: select one of multiple filename matches
 # by replying with e.g. "the second one". Selection only prints the path.
 python -m autopilot_ai.cli --interactive --planner heuristic

@@ -66,9 +66,13 @@ python -m autopilot_ai.cli "Search for DOCX files in approved folders" --planner
 python -m autopilot_ai.cli "Find images" --planner heuristic
 ```
 
+You can scope a filename or extension search to a named folder inside an approved directory, for example `Show PDF files in ML folder`, `Show PDFs in ML`, or `Find files containing Renish_Resume in ML`. AutoPilot checks for a unique matching folder among the approved roots. If more than one matches, it asks you to repeat the request with the exact folder path. Without a named folder, searches scan all approved roots recursively. Normal output states the file type/name criteria and exact searched locations.
+
 Extension search matches filename suffixes only; it does not inspect file contents. Image search currently includes PNG, JPG/JPEG, GIF, BMP, WEBP, TIF/TIFF, SVG, and HEIC files. Results stay within the configured approved roots.
 
-Search results in normal CLI output are numbered and show both each filename and its full path. Start `python -m autopilot_ai.cli --interactive --planner heuristic` for a temporary prompt session. After a search with multiple matches, reply with a number or ordinal such as `the second one` to select a path. Selection only identifies the result; it does not open or change the file. Session state is held in memory and is cleared when the process exits. One-shot CLI commands remain available as before.
+Search results in normal CLI output are numbered and show both each filename and its full path. Start `python -m autopilot_ai.cli --interactive --planner heuristic` for a temporary prompt session. If multiple approved folders match a folder-scoped request, reply with a number or ordinal such as `the second one`; AutoPilot reruns the read-only search in that folder. After a search with multiple file matches, the same kind of reply identifies a path but does not open or change the file. If a number is outside the available choices, AutoPilot repeats the choice list. Session state is held in memory and is cleared when the process exits. One-shot CLI commands remain available as before.
+
+Add `--debug` to interactive mode to print the complete JSON report, including plans, tool results, verification evidence, and candidate paths.
 
 To open a public web page and inspect its visible text:
 

@@ -129,7 +129,7 @@ def verify_file_search(
     )
     passed = observed_sorted == fresh and output_consistent and complete
     if passed:
-        summary = "Filename search independently verified across all approved roots."
+        summary = "Filename search independently verified within the approved search scope."
     elif not complete:
         summary = "Search was incomplete because a scan limit or filesystem access error was encountered."
     else:

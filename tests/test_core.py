@@ -8,9 +8,9 @@ from urllib.error import HTTPError
 import pytest
 
 from autopilot_ai.approved_dirs import add_approved_dirs, clear_approved_dirs, load_approved_dirs, remove_approved_dirs
-from autopilot_ai.agent import run_goal
+from autopilot_ai.agent import _resolve_search_scope, run_goal
 from autopilot_ai.browser import BrowserToolError, _http_status_error, open_webpage
-from autopilot_ai.cli import format_report
+from autopilot_ai.cli import format_report, render_report
 from autopilot_ai.conversation import ConversationSession
 from autopilot_ai.contracts import PlanStep, TaskPlan, ToolResult, Verification
 from autopilot_ai.desktop import DesktopToolError, _capture_screenshot, _inspect_uia, inspect_active_window
@@ -62,6 +62,8 @@ def test_session_state_keeps_context_for_invalid_reply_and_can_clear() -> None:
     assert state.select_candidate("maybe") is None
     assert state.pending_question == "Choose a file"
     assert state.select_candidate("3") is None
+    assert state.is_candidate_reply("the third one") is True
+    assert state.is_candidate_reply("Find budget") is False
     state.clear()
     assert state.pending_question is None
     assert state.candidates == ()
@@ -82,6 +84,79 @@ def test_conversation_retains_multiple_search_results_for_ordinal_reply() -> Non
     selected = session.handle("the second one", lambda _: pytest.fail("A result reply must not start a new task."))
     assert selected["status"] == "candidate_selected"
     assert selected["selected_path"] == "D:/Archive/report.pdf"
+
+
+def test_conversation_reasks_after_out_of_range_ordinal_then_accepts_choice() -> None:
+    session = ConversationSession()
+    report = {
+        "status": "completed",
+        "plan": {"tool_name": "search_files"},
+        "tool_result": {"status": "success", "output": {"matches": ["D:/A/report.pdf", "D:/B/report.pdf"], "complete": True}},
+        "verification": {"passed": True},
+    }
+    session.handle("Find report.pdf", lambda _: report)
+
+    invalid = session.handle("the third one", lambda _: pytest.fail("An invalid ordinal is still a selection reply."))
+    assert invalid["status"] == "clarification_required"
+    assert invalid["candidate_kind"] == "search_result"
+    assert len(invalid["candidates"]) == 2
+    assert "Matching search results:" in format_report(invalid)
+
+    selected = session.handle("the first one", lambda _: pytest.fail("Pending choice should resolve in memory."))
+    assert selected["selected_path"] == "D:/A/report.pdf"
+
+
+def test_debug_report_rendering_preserves_structured_candidate_evidence() -> None:
+    report = {
+        "status": "candidate_selected",
+        "goal": "the second one",
+        "selected_path": "D:/Reports/report.pdf",
+        "message": "Selected result.",
+        "candidates": ["D:/Reports/report.pdf", "D:/Archive/report.pdf"],
+    }
+
+    rendered = render_report(report, debug=True)
+
+    assert json.loads(rendered) == report
+    assert "D:/Archive/report.pdf" in rendered
+
+
+def test_interactive_cli_loops_through_invalid_and_valid_candidate_replies(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from autopilot_ai import cli
+
+    goals: list[str] = []
+    report = {
+        "status": "completed",
+        "goal": "Find report.pdf",
+        "plan": {"tool_name": "search_files", "description": "Search filenames."},
+        "tool_result": {
+            "status": "success",
+            "output": {"query": "report.pdf", "match_mode": "exact", "roots": ["D:/Reports"], "matches": ["D:/Reports/report.pdf", "D:/Archive/report.pdf"], "count": 2, "truncated": False, "complete": True, "errors": []},
+        },
+        "verification": {"passed": True, "summary": "Search independently verified."},
+    }
+
+    def fake_run_goal(goal: str, *args: object, **kwargs: object) -> dict:
+        goals.append(goal)
+        return report
+
+    user_inputs = iter(("Find report.pdf", "the third one", "the second one", "exit"))
+    monkeypatch.setattr("sys.argv", ["autopilot_ai.cli", "--interactive", "--planner", "heuristic"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(user_inputs))
+    monkeypatch.setattr(cli, "load_approved_dirs", lambda: [])
+    monkeypatch.setattr(cli, "run_goal", fake_run_goal)
+
+    cli.main()
+
+    output = capsys.readouterr().out
+    assert goals == ["Find report.pdf"]
+    assert "Matching search results:" in output
+    assert "the third one" in output
+    assert "Selected result: D:/Archive/report.pdf" in output
+    assert "Conversation ended." in output
 
 
 def test_conversation_discards_stale_candidates_when_new_task_arrives() -> None:
@@ -174,9 +249,13 @@ def test_incomplete_filename_scan_is_not_reported_as_fully_failed_or_completed(t
     )
 
     report = run_goal("Find report.pdf", tmp_path)
+    rendered = format_report(report)
 
     assert report["status"] == "partially_completed"
     assert report["verification"]["passed"] is False
+    assert "candidate file(s) before the scan became incomplete" in rendered
+    assert "more matches may exist" in rendered
+    assert "These results are not exhaustive" in rendered
 
 
 def test_normal_cli_report_is_readable_and_shows_actual_file_location(tmp_path: Path) -> None:
@@ -1107,6 +1186,9 @@ def test_search_paraphrases_find_and_verify_exact_filename(tmp_path: Path, goal:
         ("Find images", [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"]),
         ("Find files with extension .md", [".md"]),
         ("Show me word documents", [".doc", ".docx"]),
+        ("Shows pdf files in ML folder", [".pdf"]),
+        ("Show PDF files inside ML", [".pdf"]),
+        ("Find all PDFs in all approved folders", [".pdf"]),
     ],
 )
 def test_extension_search_phrasings_are_deterministic(goal: str, extensions: list[str]) -> None:
@@ -1138,6 +1220,164 @@ def test_extension_search_is_verified_and_stays_inside_approved_roots(tmp_path: 
     assert report["tool_result"]["output"]["roots"] == [str(primary.resolve()), str(extra.resolve())]
     assert str((unapproved / "private.pdf").resolve()) not in report["tool_result"]["output"]["matches"]
     assert report["verification"]["passed"] is True
+
+
+def test_named_folder_extension_search_is_scoped_to_primary_workspace(tmp_path: Path) -> None:
+    primary = tmp_path / "workspace"
+    extra = tmp_path / "other-approved"
+    ml = primary / "ML"
+    ml.mkdir(parents=True)
+    extra.mkdir()
+    (ml / "lecture.pdf").write_bytes(b"pdf")
+    (primary / "outside.pdf").write_bytes(b"pdf")
+    (extra / "approved-but-out-of-scope.pdf").write_bytes(b"pdf")
+
+    report = run_goal("Show PDF files in ML folder", primary, approved_dirs=[extra])
+
+    assert report["status"] == "completed"
+    assert report["plan"]["arguments"]["path"] == "ML"
+    assert report["tool_result"]["output"]["roots"] == [str(ml.resolve())]
+    assert report["tool_result"]["output"]["matches"] == [str((ml / "lecture.pdf").resolve())]
+    assert report["verification"]["passed"] is True
+
+
+def test_named_folder_filename_search_is_scoped_and_verified(tmp_path: Path) -> None:
+    ml = tmp_path / "ML"
+    ml.mkdir()
+    (ml / "Renish_Resume.pdf").write_bytes(b"resume")
+    (tmp_path / "Renish_Resume_old.pdf").write_bytes(b"other")
+
+    report = run_goal("Find files containing Renish_Resume in ML folder", tmp_path)
+
+    assert report["status"] == "completed"
+    assert report["plan"]["arguments"]["query"] == "Renish_Resume"
+    assert report["plan"]["arguments"]["path"] == "ML"
+    assert report["tool_result"]["output"]["matches"] == [str((ml / "Renish_Resume.pdf").resolve())]
+    assert report["verification"]["passed"] is True
+
+
+def test_named_folder_without_folder_word_keeps_filename_query_and_scope(tmp_path: Path) -> None:
+    ml = tmp_path / "ML"
+    ml.mkdir()
+    (ml / "Renish_Resume.pdf").write_bytes(b"resume")
+
+    report = run_goal("Find files containing Renish_Resume in ML", tmp_path)
+
+    assert report["status"] == "completed"
+    assert report["plan"]["arguments"]["query"] == "Renish_Resume"
+    assert report["tool_result"]["output"]["matches"] == [str((ml / "Renish_Resume.pdf").resolve())]
+    assert report["verification"]["passed"] is True
+
+
+def test_named_folder_search_rejects_path_escape(tmp_path: Path) -> None:
+    report = run_goal("Find PDFs in .. folder", tmp_path)
+
+    assert report["status"] == "denied"
+    assert "Parent-directory traversal" in report["message"]
+
+
+def test_named_folder_missing_from_all_approved_roots_has_clear_message(tmp_path: Path) -> None:
+    report = run_goal("Find PDFs in MissingFolder", tmp_path)
+
+    assert report["status"] == "denied"
+    assert "No folder named 'MissingFolder'" in report["message"]
+    assert "approved directories" in report["message"]
+
+
+def test_inaccessible_named_folder_candidate_is_not_treated_as_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from autopilot_ai.agent import _resolve_search_scope
+
+    workspace = tmp_path / "workspace"
+    inaccessible = tmp_path / "approved" / "ML"
+    workspace.mkdir()
+    inaccessible.mkdir(parents=True)
+    policy = PathPolicy(workspace, [inaccessible.parent])
+    original_stat = Path.stat
+
+    def deny_candidate_stat(path: Path, *args: object, **kwargs: object):
+        if path == inaccessible:
+            raise PermissionError("simulated access denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", deny_candidate_stat)
+    with pytest.raises(PolicyError, match="Could not inspect the requested folder.*access denied"):
+        _resolve_search_scope(policy, {"path": "ML", "root_index": 0})
+
+
+def test_named_approved_root_is_selected_when_folder_name_matches_root(tmp_path: Path) -> None:
+    primary = tmp_path / "workspace"
+    approved_ml = tmp_path / "ML"
+    primary.mkdir()
+    approved_ml.mkdir()
+    (approved_ml / "course.pdf").write_bytes(b"pdf")
+
+    report = run_goal("Find PDFs in ML folder", primary, approved_dirs=[approved_ml])
+
+    assert report["status"] == "completed"
+    assert report["tool_result"]["output"]["roots"] == [str(approved_ml.resolve())]
+    assert report["tool_result"]["output"]["matches"] == [str((approved_ml / "course.pdf").resolve())]
+    assert report["verification"]["passed"] is True
+
+
+def test_named_folder_ambiguity_requests_exact_approved_path(tmp_path: Path) -> None:
+    primary = tmp_path / "workspace"
+    primary_ml = primary / "ML"
+    approved_ml = tmp_path / "ML"
+    primary_ml.mkdir(parents=True)
+    approved_ml.mkdir()
+
+    report = run_goal("Find PDFs in ML folder", primary, approved_dirs=[approved_ml])
+
+    assert report["status"] == "clarification_required"
+    assert "full path" in report["question"]
+    assert set(report["candidates"]) == {str(primary_ml.resolve()), str(approved_ml.resolve())}
+    rendered = format_report(report)
+    assert str(primary_ml.resolve()) in rendered
+    assert str(approved_ml.resolve()) in rendered
+
+
+def test_exact_approved_root_path_can_disambiguate_named_folder(tmp_path: Path) -> None:
+    primary = tmp_path / "workspace"
+    approved_ml = tmp_path / "ML"
+    primary.mkdir()
+    approved_ml.mkdir()
+    (approved_ml / "course.pdf").write_bytes(b"pdf")
+
+    report = run_goal(f'Find PDFs in "{approved_ml}" folder', primary, approved_dirs=[approved_ml])
+
+    assert report["status"] == "completed"
+    assert report["tool_result"]["output"]["roots"] == [str(approved_ml.resolve())]
+    assert report["verification"]["passed"] is True
+
+
+def test_interactive_ordinal_selects_ambiguous_folder_and_runs_verified_search(tmp_path: Path) -> None:
+    primary = tmp_path / "workspace"
+    first_ml = primary / "ML"
+    second_root = tmp_path / "approved"
+    second_ml = second_root / "ML"
+    first_ml.mkdir(parents=True)
+    second_ml.mkdir(parents=True)
+    (first_ml / "first.pdf").write_bytes(b"first")
+    (second_ml / "second.pdf").write_bytes(b"second")
+    session = ConversationSession()
+
+    def execute(goal: str) -> dict:
+        return run_goal(goal, primary, approved_dirs=[second_root])
+
+    clarification = session.handle("Find PDFs in ML folder", execute)
+    assert clarification["status"] == "clarification_required"
+    assert clarification["scope_kind"] == "folder"
+    rendered = format_report(clarification)
+    assert "Reply with a number or ordinal" in rendered
+    assert "repeat the request with the exact folder path" not in rendered
+
+    result = session.handle("the second one", execute)
+
+    assert result["status"] == "completed"
+    assert result["goal"] == "Find PDFs in ML folder"
+    assert result["selected_folder"] == str(second_ml.resolve())
+    assert result["tool_result"]["output"]["matches"] == [str((second_ml / "second.pdf").resolve())]
+    assert result["verification"]["passed"] is True
 
 
 def test_image_extension_search_matches_multiple_suffixes(tmp_path: Path) -> None:

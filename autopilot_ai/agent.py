@@ -1,6 +1,7 @@
 """One bounded receive-plan-policy-execute-verify cycle."""
 
 from pathlib import Path
+import stat
 import time
 from typing import Any
 
@@ -9,6 +10,72 @@ from .policy import PathPolicy, PolicyError
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
 from .verifier import verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open, verify_desktop_inspection
+
+
+class AmbiguousSearchScope(ValueError):
+    def __init__(self, folder: str, candidates: list[Path]) -> None:
+        super().__init__(folder)
+        self.folder = folder
+        self.candidates = candidates
+
+
+def _resolve_search_scope(policy: PathPolicy, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a named folder only when it identifies one approved location."""
+    path = str(arguments.get("path", "."))
+    if path in ("", ".") or arguments.get("root_index") is None:
+        return arguments
+
+    requested = Path(path).expanduser()
+    if requested.is_absolute() or requested.drive:
+        try:
+            absolute = requested.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise PolicyError("The requested folder does not exist or cannot be resolved.") from exc
+        scoped_locations: list[tuple[int, str]] = []
+        for index, root in enumerate(policy.approved_roots):
+            try:
+                relative = absolute.relative_to(root)
+            except ValueError:
+                continue
+            relative_text = str(relative) if relative.parts else "."
+            scoped = policy.resolve_path(relative_text, index)
+            if scoped == absolute and scoped.is_dir():
+                scoped_locations.append((index, relative_text))
+        unique_locations = list(dict.fromkeys(scoped_locations))
+        if len(unique_locations) != 1:
+            raise PolicyError("The absolute folder path must identify one location inside an approved directory.")
+        root_index, relative_path = unique_locations[0]
+        return {**arguments, "path": relative_path, "root_index": root_index}
+
+    candidates: list[tuple[Path, int, str]] = []
+    for index, root in enumerate(policy.approved_roots):
+        # A request such as 'in ML folder' can refer to an approved root named
+        # ML itself, or to a child folder ML beneath an approved root.
+        if len(requested.parts) == 1 and requested.parts[0].casefold() == root.name.casefold():
+            candidates.append((root, index, "."))
+        try:
+            scoped = policy.resolve_path(path, index)
+        except OSError as exc:
+            raise PolicyError(f"Could not inspect the requested folder under approved root {root}: {exc}") from exc
+        try:
+            scoped_info = scoped.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            raise PolicyError(f"Could not inspect the requested folder under approved root {root}: {exc}") from exc
+        if stat.S_ISDIR(scoped_info.st_mode):
+            candidates.append((scoped, index, path))
+
+    unique: dict[str, tuple[Path, int, str]] = {}
+    for candidate in candidates:
+        unique[str(candidate[0]).casefold()] = candidate
+    candidates = list(unique.values())
+    if not candidates:
+        raise PolicyError(f"No folder named '{path}' was found in the approved directories.")
+    if len(candidates) > 1:
+        raise AmbiguousSearchScope(path, [candidate[0] for candidate in candidates])
+    selected, root_index, relative_path = candidates[0]
+    return {**arguments, "path": relative_path, "root_index": root_index}
 
 
 def run_goal(
@@ -87,6 +154,20 @@ def run_goal(
     for step in steps:
         if step.tool_name not in registry.names:
             return {"status": "denied", "goal": goal, "message": "Plan selected a tool that is not registered."}
+        if step.tool_name == "search_files":
+            try:
+                resolved_scope = _resolve_search_scope(policy, step.arguments)
+                step = step.model_copy(update={"arguments": resolved_scope})
+            except AmbiguousSearchScope as exc:
+                return {
+                    "status": "clarification_required",
+                    "goal": goal,
+                    "question": f"More than one approved folder matches '{exc.folder}'. Specify the full path of the folder to search.",
+                    "candidates": [str(candidate) for candidate in exc.candidates],
+                    "scope_kind": "folder",
+                }
+            except (TypeError, ValueError, OSError, RuntimeError) as exc:
+                return {"status": "denied", "goal": goal, "message": f"Search folder rejected: {exc}"}
         try:
             validated_arguments = registry.validate_arguments(step.tool_name, step.arguments)
         except ToolArgumentsError as exc:
@@ -117,9 +198,15 @@ def run_goal(
                 target = policy.resolve(step.arguments.get("path", "."))
                 search_targets = None
                 source = None
-            else:
-                search_targets = [policy.resolve(step.arguments.get("path", "."), i) for i in range(len(policy.approved_roots))]
+            elif step.tool_name == "search_files":
+                root_index = step.arguments.get("root_index")
+                indexes = range(len(policy.approved_roots)) if root_index is None else (root_index,)
+                search_targets = [policy.resolve(step.arguments.get("path", "."), i) for i in indexes]
                 target = search_targets[0]
+                source = None
+            else:
+                target = None
+                search_targets = None
                 source = None
         except (TypeError, ValueError, OSError, RuntimeError) as exc:
             return {"status": "denied", "goal": goal, "message": f"Plan path rejected: {exc}"}

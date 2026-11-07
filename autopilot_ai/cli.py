@@ -74,7 +74,7 @@ def main() -> None:
     except ApprovedDirectoryError as exc:
         print(json.dumps({"status": "error", "message": str(exc)}, indent=2))
         raise SystemExit(1) from exc
-    print(json.dumps(report, indent=2, ensure_ascii=True) if args.debug else format_report(report))
+    print(render_report(report, debug=args.debug))
     if report["status"] not in ("completed", "approval_required"):
         raise SystemExit(1)
 
@@ -106,7 +106,16 @@ def _run_interactive(args: argparse.Namespace) -> None:
                 desktop_delay_seconds=args.delay_seconds,
             ),
         )
-        print(format_selection(report) if report.get("status") == "candidate_selected" else format_report(report))
+        print(render_report(report, debug=args.debug))
+
+
+def render_report(report: dict, debug: bool = False) -> str:
+    """Render normal user output or preserve the complete structured report."""
+    if debug:
+        return json.dumps(report, indent=2, ensure_ascii=True)
+    if report.get("status") == "candidate_selected":
+        return format_selection(report)
+    return format_report(report)
 
 
 def format_report(report: dict) -> str:
@@ -122,6 +131,8 @@ def format_report(report: dict) -> str:
         "error": "Failed",
     }
     lines = [f"Task: {report.get('goal', 'AutoPilot task')}", f"Status: {labels.get(report.get('status'), 'Failed')}"]
+    if report.get("selected_folder"):
+        lines.append(f"Selected folder: {report['selected_folder']}")
     steps = report.get("steps")
     reports = steps if isinstance(steps, list) else ([report] if report.get("plan") else [])
     if reports:
@@ -144,7 +155,17 @@ def format_report(report: dict) -> str:
                     lines.append(f"  ...and {len(visible_items) - 50} more item(s). Use --debug for the full listing.")
             elif plan.get("tool_name") == "search_files":
                 matches = output.get("matches", [])
-                lines.append(f"  Found {len(matches)} matching file(s).")
+                if output.get("complete") is False:
+                    lines.append(f"  Found {len(matches)} candidate file(s) before the scan became incomplete; more matches may exist.")
+                else:
+                    lines.append(f"  Found {len(matches)} matching file(s).")
+                if output.get("extensions"):
+                    lines.append(f"  File type: {', '.join(output['extensions'])}")
+                elif output.get("query"):
+                    lines.append(f"  Filename: {output['query']} ({output.get('match_mode', 'exact')} match)")
+                if output.get("roots"):
+                    lines.append("  Searched in:")
+                    lines.extend(f"  - {root}" for root in output["roots"])
                 for index, match in enumerate(matches, start=1):
                     lines.append(f"  {index}) {Path(match).name}")
                     lines.append(f"     {match}")
@@ -212,12 +233,28 @@ def format_report(report: dict) -> str:
         lines.append("Next: review the planned change, then rerun the same task with --approve.")
     elif status == "clarification_required":
         lines.append(f"Question: {report.get('question', 'Please clarify the request.')}")
+        candidates = report.get("candidates", [])
+        if candidates:
+            candidate_kind = report.get("candidate_kind", report.get("scope_kind", "folder_scope"))
+            heading = "Matching search results:" if candidate_kind == "search_result" else "Matching approved folders:"
+            lines.append(heading)
+            lines.extend(f"  {index}) {candidate}" for index, candidate in enumerate(candidates, start=1))
+            if not report.get("follow_up_question"):
+                lines.append("Next: repeat the request with the exact folder path from this list.")
     if report.get("follow_up_question"):
         lines.append(f"Follow-up: {report['follow_up_question']} Reply with a number or ordinal (for example, 'the second one').")
     elif status == "unsupported":
         lines.append("Next: use a supported request or wait for that capability to be implemented.")
     elif status == "partially_completed":
-        lines.append("Next: review the completed step evidence and resolve the failed step before continuing.")
+        incomplete_search = any(
+            item.get("plan", {}).get("tool_name") == "search_files"
+            and item.get("tool_result", {}).get("output", {}).get("complete") is False
+            for item in reports
+        )
+        if incomplete_search:
+            lines.append("Next: check the scan warnings and folder access above, then rerun. These results are not exhaustive.")
+        else:
+            lines.append("Next: review the completed step evidence and resolve the failed step before continuing.")
     elif status in {"failed", "denied", "error"} and any(
         item.get("plan", {}).get("tool_name") == "open_webpage"
         and item.get("tool_result", {}).get("error_code") == "browser_error"

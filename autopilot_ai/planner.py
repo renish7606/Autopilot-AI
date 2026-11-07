@@ -50,18 +50,19 @@ _FILE_TYPE_EXTENSIONS = {
 def _requested_extensions(goal: str) -> list[str] | None:
     """Resolve an explicit file-type request without asking the LLM to guess."""
     command = re.fullmatch(
-        r"(?:please\s+)?(?:find|search(?:\s+for)?|locate|list|show(?:\s+me)?)\s+(.+?)\s*[?.!]*",
+        r"(?:please\s+)?(?:find|search(?:\s+for)?|locate|list|show(?:s)?(?:\s+me)?)\s+(.+?)\s*[?.!]*",
         goal.strip(),
         flags=re.IGNORECASE,
     )
     if not command:
         return None
     target = command.group(1).strip().casefold()
-    target = re.split(
-        r"\s+(?:in|under|within)\s+(?:(?:my|the|this)\s+)?(?:approved\s+)?(?:folders?|directories|locations|workspace|computer)\b",
-        target,
-        maxsplit=1,
-    )[0].strip()
+    if _requested_folder(goal):
+        scope_suffix = re.search(r"\s+(?:in|inside|under|within)\s+(?:the\s+)?(?:\"[^\"]+\"|'[^']+'|.+?)\s*$", target)
+        if scope_suffix:
+            target = target[:scope_suffix.start()].strip()
+    target = re.split(r"\s+(?:in|inside|under|within)\s+(?:the\s+)?[^,.!?]+?\s+folder\b", target, maxsplit=1)[0].strip()
+    target = re.split(r"\s+(?:in|under|within|across)\s+(?:(?:all|my|the|this)\s+)?(?:approved\s+)?(?:folders?|directories|locations|workspace|computer)\b", target, maxsplit=1)[0].strip()
     target = re.sub(r"^(?:all|any|the)\s+", "", target)
     if target in _FILE_TYPE_EXTENSIONS:
         return _FILE_TYPE_EXTENSIONS[target]
@@ -74,6 +75,29 @@ def _requested_extensions(goal: str) -> list[str] | None:
     named_extension = re.fullmatch(r"(?:files?\s+with\s+(?:the\s+)?extension\s+|extension\s+)([a-z0-9]{1,10})", target)
     if named_extension:
         return [f".{named_extension.group(1)}"]
+    return None
+
+
+def _requested_folder(goal: str) -> str | None:
+    """Extract a named folder scope; its path is still checked by PathPolicy."""
+    patterns = (
+        r"\b(?:in|inside|under|within)\s+(?:the\s+)?(?P<folder>\"[^\"]+\"|'[^']+'|.+?)\s+(?:folder|directory)\b",
+        r"\b(?:in|inside|under|within)\s+folder\s+(?P<folder>\"[^\"]+\"|'[^']+'|.+?)\s*$",
+        r"\b(?:in|inside|under|within)\s+(?:the\s+)?(?P<folder>\"[^\"]+\"|'[^']+'|.+?)\s*$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, goal, flags=re.IGNORECASE)
+        if not match:
+            continue
+        folder = match.group("folder").strip().strip(" \t\"'")
+        folded = folder.casefold()
+        if (
+            not folder
+            or folded in {"approved", "my approved", "this", "the approved", "this folder", "the folder", "my folder"}
+            or folded.endswith((" folder", " folders", " directory", " directories", " workspace", " computer"))
+        ):
+            return None
+        return folder
     return None
 
 
@@ -115,13 +139,20 @@ def plan_goal(goal: str) -> PlanStep:
         return PlanStep(step_id="step-1", description="Copy a file within approved directories without overwriting an existing destination.", tool_name="copy_file", arguments={"source_path": source, "destination_path": destination}, expected_result="The copied file has the same size and SHA-256 digest as its source.", risk_level="medium", requires_approval=True)
     if normalized.startswith(("copy ", "duplicate ")):
         raise ClarificationRequired("Which source file should I copy, and what destination path should I use?")
+    folder_scope = _requested_folder(goal)
     requested_extensions = _requested_extensions(goal)
     if requested_extensions:
+        arguments = {"path": folder_scope or ".", "query": "", "match_mode": "exact", "extensions": requested_extensions, "max_results": 100}
+        if folder_scope:
+            arguments["root_index"] = 0
         return PlanStep(
             step_id="step-1",
-            description="Search approved directories for files with the requested extension.",
+            description=(
+                "Search for files with the requested extension inside the selected approved folder."
+                if folder_scope else "Search approved directories for files with the requested extension."
+            ),
             tool_name="search_files",
-            arguments={"path": ".", "query": "", "match_mode": "exact", "extensions": requested_extensions, "max_results": 100},
+            arguments=arguments,
             expected_result="An independent filename scan confirms all matching file extensions under approved roots.",
             risk_level="low",
             requires_approval=False,
@@ -135,7 +166,7 @@ def plan_goal(goal: str) -> PlanStep:
         "delete ", "move ", "rename ", "copy ", "duplicate ", "create ", "make ", "run ", "what ", "who ",
         "why ", "how ", "when ", "where ", "tell me ", "can you ", "could you ", "please ",
     )
-    begins_with_command = raw_filename.casefold().startswith(command_prefixes)
+    begins_with_command = raw_filename.casefold().startswith(command_prefixes) or bool(re.match(r"^shows?\s", raw_filename, re.IGNORECASE))
     looks_like_filename = not begins_with_command and (
         filename_with_extension or hidden_filename or (
             bool(raw_filename)
@@ -160,24 +191,35 @@ def plan_goal(goal: str) -> PlanStep:
             )
             query = match.group(1).strip() if match else ""
             query = re.split(
-                r"\s+(?:in\s+(?:this|the|my)\s+(?:workspace|folder|directory|computer|files)|"
-                r"on\s+my\s+computer|across\s+my\s+computer)\b",
+                r"\s+(?:in|inside|under|within)\s+(?:the\s+)?[^,.!?]+?\s+(?:folder|directory)\b|"
+                r"\s+(?:in|under|within|across)\s+(?:(?:all|my|the|this)\s+)?(?:approved\s+)?(?:folders?|directories|workspace|computer|files)\b|"
+                r"\s+on\s+my\s+computer\b",
                 query,
                 flags=re.IGNORECASE,
             )[0]
+            if folder_scope:
+                scope_suffix = re.search(r"\s+(?:in|inside|under|within)\s+(?:the\s+)?(?:\"[^\"]+\"|'[^']+'|.+?)\s*$", query)
+                if scope_suffix:
+                    query = query[:scope_suffix.start()]
             query = re.sub(r"[?.!]+$", "", query).strip()
         if not query or query.casefold().strip(" .!?") in {"file", "files", "a file", "a files", "named", "called", "containing", "with", "for"}:
             raise ClarificationRequired("What filename or part of a filename should I search for?")
+        arguments = {
+            "path": folder_scope or ".",
+            "query": query,
+            "match_mode": "contains" if any(term in normalized for term in ("containing", "contains", "substring", "partial")) else "exact",
+            "max_results": 100,
+        }
+        if folder_scope:
+            arguments["root_index"] = 0
         return PlanStep(
             step_id="step-1",
-            description="Search filenames under the approved workspace.",
+            description=(
+                "Search filenames inside the selected approved folder."
+                if folder_scope else "Search filenames under the approved workspace."
+            ),
             tool_name="search_files",
-            arguments={
-                "path": ".",
-                "query": query,
-                "match_mode": "contains" if any(term in normalized for term in ("containing", "contains", "substring", "partial")) else "exact",
-                "max_results": 100,
-            },
+            arguments=arguments,
             expected_result="An independent filename scan matches the returned search results.",
             risk_level="low",
             requires_approval=False,
@@ -263,6 +305,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
         "search_files searches filenames across explicitly approved roots; never search contents. Use relative path '.'. "
         "For exact filename search use query equal to the filename and match_mode='exact'; for a requested partial name use "
         "match_mode='contains'. For file-type search, use query='' and the exact extensions list requested by the user; "
+        "when the user names a folder, use that folder as path and root_index=0 (the primary approved workspace), after deterministic parsing; "
         "images map only to the predefined image suffix set. Include EVERY requested action; do not omit an action or combine actions into one step. "
         "Preserve the user's order. Use arguments key 'path', never 'root'. "
         "Example: 'Show files and then find report.pdf' requires exactly two steps: first list_directory with arguments {path:'.'}, "

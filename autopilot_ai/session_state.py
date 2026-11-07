@@ -42,22 +42,34 @@ class SessionState:
         """Resolve replies such as '2' or 'the second one'; leave state on mismatch."""
         if self.pending_question is None:
             return None
-        normalized = reply.strip().casefold()
-        match = re.fullmatch(
-            r"(?:the\s+)?(\d+|first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th)(?:\s+(?:one|file|folder|result))?[.!]?",
-            normalized,
-        )
-        if not match:
-            return None
-        token = match.group(1)
-        index = int(token) if token.isdigit() else _ORDINALS[token]
-        if index < 1 or index > len(self.candidates):
+        index = _candidate_index(reply)
+        if index is None or index < 1 or index > len(self.candidates):
             return None
         selected = self.candidates[index - 1]
         self.clear()
         return selected
 
+    def is_candidate_reply(self, reply: str) -> bool:
+        """Tell a syntactically numbered reply from a new natural-language task."""
+        return self.pending_question is not None and _candidate_index(reply) is not None
+
     def clear(self) -> None:
         """Forget pending clarification and candidates."""
         self.pending_question = None
         self.candidates = ()
+
+
+def _candidate_index(reply: str) -> int | None:
+    if not isinstance(reply, str):
+        return None
+    normalized = reply.strip().casefold()
+    match = re.fullmatch(
+        r"(?:the\s+)?(\d+(?:st|nd|rd|th)?|first|second|third|fourth|fifth)(?:\s+(?:one|file|folder|result))?[.!]?",
+        normalized,
+    )
+    if not match:
+        return None
+    token = match.group(1)
+    if token[0].isdigit():
+        return int(re.match(r"\d+", token).group())
+    return _ORDINALS[token]

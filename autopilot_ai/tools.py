@@ -26,6 +26,7 @@ class SearchFilesArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(default=".", min_length=1, max_length=300)
+    root_index: int | None = Field(default=None, ge=0)
     query: str = Field(default="", max_length=200)
     match_mode: Literal["exact", "contains"] = "exact"
     extensions: list[str] = Field(default_factory=list, max_length=16)
@@ -158,6 +159,7 @@ def _search_files(
     match_mode: str,
     max_results: int,
     extensions: list[str],
+    root_index: int | None,
 ) -> dict[str, Any]:
     needle = query.casefold().strip()
     extensions = [extension.casefold() for extension in extensions]
@@ -170,8 +172,9 @@ def _search_files(
     errors: list[str] = []
     visited = 0
     truncated = False
-    for root_index in range(len(policy.approved_roots)):
-        root = policy.resolve(path, root_index)
+    root_indexes = range(len(policy.approved_roots)) if root_index is None else (root_index,)
+    for selected_root_index in root_indexes:
+        root = policy.resolve(path, selected_root_index)
         roots.append(str(root))
 
         def record_walk_error(error: OSError) -> None:
