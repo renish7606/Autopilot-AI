@@ -7,7 +7,7 @@ from .contracts import ToolResult, Verification
 
 MAX_ATTEMPTS = 2
 RETRYABLE_READ_ONLY_TOOLS = frozenset({"list_directory", "search_files", "open_webpage", "inspect_active_window"})
-NON_RETRYABLE_MUTATING_TOOLS = frozenset({"create_directory", "copy_file", "run_command"})
+NON_RETRYABLE_MUTATING_TOOLS = frozenset({"create_directory", "copy_file", "run_command", "launch_app"})
 
 
 def should_retry(tool_name: str, result: ToolResult, verification: Verification, attempt: int) -> bool:

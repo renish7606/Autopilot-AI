@@ -1,8 +1,12 @@
 """Independent postcondition checks for filesystem, browser, and desktop tools."""
 
 from pathlib import Path
+import csv
+from io import StringIO
 import os
 import hashlib
+import subprocess
+import time
 
 from .contracts import ToolResult, Verification
 from .browser import open_webpage
@@ -18,6 +22,40 @@ def verify_command_execution(result: ToolResult) -> Verification:
     passed = isinstance(out.get("exit_code"), int) and out.get("timed_out") is False and out.get("exit_code") == 0
     summary = "Command completed successfully with exit code 0." if passed else f"Command finished with exit code {out.get('exit_code')} or timed out."
     return Verification(passed=passed, summary=summary, evidence=out)
+
+
+def verify_app_launch(result: ToolResult) -> Verification:
+    """Independently confirm that Windows still reports the launched process."""
+    if result.status != "success":
+        return Verification(passed=False, summary="Application did not launch successfully.", evidence={"status": result.status, "error_code": result.error_code})
+    output = result.output
+    pid = output.get("pid")
+    executable = output.get("executable_path")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or not isinstance(executable, str) or not executable:
+        return Verification(passed=False, summary="Application launch output was malformed.", evidence=output)
+    time.sleep(0.5)
+    try:
+        observation = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Verification(passed=False, summary="Windows could not independently inspect the launched process.", evidence={"pid": pid, "error": str(exc)})
+    expected_name = Path(executable).name.casefold()
+    rows = list(csv.reader(StringIO(observation.stdout)))
+    process_rows = [row for row in rows if len(row) >= 2]
+    pid_matches = any(row[1] == str(pid) for row in process_rows)
+    executable_matches = any(row[0].casefold() == expected_name for row in process_rows)
+    passed = observation.returncode == 0 and (pid_matches or executable_matches)
+    return Verification(
+        passed=passed,
+        summary="Application launch independently verified by Windows process listing." if passed else "Windows did not find the launched process or executable.",
+        evidence={"pid": pid, "expected_executable": expected_name, "tasklist_returncode": observation.returncode, "pid_matches": pid_matches, "executable_matches": executable_matches},
+    )
 
 
 def verify_directory_listing(result: ToolResult, directory: Path) -> Verification:

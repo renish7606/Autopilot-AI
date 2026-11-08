@@ -1,10 +1,10 @@
 # AutoPilot AI
 
-AutoPilot AI is a local-first autonomous computer-use agent, developed in verified phases. The current CLI can plan and execute bounded filesystem and read-only browser tasks, and inspect the active Windows window; desktop actions, calendar integration, task memory, and a dashboard remain future phases.
+AutoPilot AI is a local-first autonomous computer-use agent, developed in verified phases. The current CLI can plan and execute bounded filesystem tasks, selected terminal commands, read-only browser tasks, launch installed Windows applications, and inspect the active Windows window; desktop actions, calendar integration, task memory, and a dashboard remain future phases.
 
 ## Current phase
 
-The current runnable slice accepts a natural-language request, asks one local Ollama model for a schema-constrained plan by default, validates each proposal against deterministic intent, registered tools, and policy, and verifies results. Read-only directory listing and recursive filename search can be combined in sequences of up to three steps; each is verified before the next starts. Controlled file changes include creating a directory and copying a file within the primary workspace; both require `--approve`, reject path escapes and existing destinations, and are independently verified. Playwright opens public HTTP/HTTPS pages in a fresh context and verifies them in another. Windows UI Automation can inspect the foreground window; if UIA fails, PyAutoGUI saves a screenshot under `D:\Agent\down\screenshots`. Read-only tools get one retry after an execution error or verification mismatch; file changes are never automatically repeated. Unsupported model plans fall back to deterministic intent parsing. The CLI is the initial interface; React is intentionally deferred.
+The current runnable slice accepts a natural-language request, asks one local Ollama model for a schema-constrained plan by default, validates each proposal against deterministic intent, registered tools, and policy, and verifies results. Read-only directory listing and recursive filename search can be combined in sequences of up to three steps; each is verified before the next starts. Controlled file changes include creating a directory and copying a file within the primary workspace; both require `--approve`, reject path escapes and existing destinations, and are independently verified. Terminal commands run only from an approved working directory; destructive commands are blocked, and non-inspection commands require `--approve`. An application launch requires `--approve` once per application name; successful approvals are stored locally and later launches of that same application run directly. Launches are verified from the Windows process list. Playwright opens public HTTP/HTTPS pages in a fresh context and verifies them in another. Windows UI Automation can inspect the foreground window; if UIA fails, PyAutoGUI saves a screenshot under `D:\Agent\down\screenshots`. Read-only tools get one retry after an execution error or verification mismatch; file changes, terminal commands, and application launches are never automatically repeated. Unsupported model plans fall back to deterministic intent parsing. The CLI is the initial interface; React is intentionally deferred.
 
 The local planner connects to Ollama at `http://127.0.0.1:11434` and defaults to `qwen2.5:0.5b`; override it with `AUTOPILOT_MODEL`. The development setup has Qwen installed under `D:\Agent\down\models`. Keep Ollama running to use model planning; supported requests can fall back to the deterministic planner if Ollama is unavailable or returns a plan that does not match the request. The observed machine profile was 7.7 GiB RAM, 0.84 GiB available RAM, a 12th Gen Intel Core i5-1235U with 12 logical CPUs, and 196 GiB free on D:. Runtime headroom should still be measured before choosing a larger model.
 
@@ -27,7 +27,7 @@ python -m autopilot_ai.cli "Show me the files in this folder"
 
 Playwright uses a fresh, headless Chromium context for each page. Browser binaries are kept under `D:\Agent\down\playwright-browsers`; the application sets this location by default. It only opens public HTTP/HTTPS pages, blocks localhost/private-network destinations, downloads, and requests other than GET/HEAD, and returns visible page text (up to 4,000 characters). It does not submit forms or reuse your personal browser profile. Sites can refuse automated requests or require sign-in; those responses are reported as failures, and AutoPilot cannot use a session from your regular browser.
 
-Desktop inspection uses pywinauto with the Windows UI Automation (`uia`) backend. If UIA fails, the fallback captures only the visible region of the foreground window on the primary display with PyAutoGUI. Screenshots are saved under `D:\Agent\down\screenshots`; they may still contain sensitive information shown inside that application. Verification checks the image dimensions and that the same window remains active. This phase does not click, type, or launch applications.
+Desktop inspection uses pywinauto with the Windows UI Automation (`uia`) backend. If UIA fails, the fallback captures only the visible region of the foreground window on the primary display with PyAutoGUI. Screenshots are saved under `D:\Agent\down\screenshots`; they may still contain sensitive information shown inside that application. Verification checks the image dimensions and that the same window remains active. This phase does not click or type.
 
 By default, the approved workspace is `workspace/`. Set `--workspace` to select a different primary root. For filename search, approve directories once and then search by filename alone. The local allowlist is stored in `data/approved_directories.json` on D: and can be inspected or cleared. `--approved-dir` remains available for a one-time root. Listing is limited to the primary root; filename search checks every approved root.
 
@@ -88,6 +88,26 @@ python -m autopilot_ai.cli "Inspect active window" --planner heuristic --delay-s
 ```
 
 The delay pauses for five seconds after planning and before inspection. Use that time to switch focus to the app you want inspected. Without a delay, the terminal or IDE running the command will usually remain the foreground window.
+
+To run a safe inspection command in the approved workspace:
+
+```powershell
+python -m autopilot_ai.cli "Run command 'git status'" --planner heuristic
+python -m autopilot_ai.cli "Run command 'python --version'" --planner heuristic
+```
+
+Other terminal commands require approval. Command output is capped and the process must exit with code 0 for verification to pass:
+
+```powershell
+python -m autopilot_ai.cli "Run command python --help" --planner heuristic --approve
+```
+
+To launch an installed application, first review the planned launch and then repeat with approval. A successful approval is persisted in `data/approved_apps.json` for that application name, so later launches do not require `--approve`. Built-in aliases include Notepad, Calculator, Chrome (including Google Chrome), Edge, Explorer, CMD, PowerShell, VS Code, and Paint. Chrome is also discovered through Windows App Paths and standard installation locations. The verifier waits briefly and checks Windows' process list for the returned PID or executable name.
+
+```powershell
+python -m autopilot_ai.cli "Launch Notepad" --planner heuristic
+python -m autopilot_ai.cli "Launch Notepad" --planner heuristic --approve
+```
 
 File changes are previewed first. Review the `plan` in the output, then repeat the request with `--approve` to authorize it. Supported changes are creating one new directory or copying one file to a new destination under the primary workspace. Copy sources may be relative to any approved root by setting `source_root_index` in a direct tool call; the natural-language CLI currently uses the primary root.
 
@@ -171,8 +191,8 @@ Multi-step tasks report `Partially completed` if earlier steps were verified but
 
 ## Current improvement phase
 
-The current work is auditing and hardening the existing search, file operations, browser navigation, desktop inspection, planning, verification, recovery and CLI behavior before adding capabilities. Calendar integration, additional desktop controls, task memory, terminal execution and the React dashboard remain out of scope until the existing capabilities meet their acceptance criteria. Do not expose unrestricted shell execution or claim task success without verification.
+The current work is auditing and hardening the existing search, file operations, browser navigation, terminal execution, application launch, desktop inspection, planning, verification, recovery and CLI behavior before adding capabilities. Calendar integration, additional desktop controls, task memory, and the React dashboard remain out of scope until the existing capabilities meet their acceptance criteria. Do not expose unrestricted shell execution or claim task success without verification.
 
 ## Safety boundary
 
-Registered tools are allowlisted and validate arguments with Pydantic. Search checks filename matches only, skips symlinks, reports inaccessible locations or limits as incomplete, and returns full paths. Create and copy operate only in the primary approved workspace and never overwrite an existing destination; they require `--approve`. Browser access is read-only and rejects local/private destinations. Desktop access only reads accessibility information or captures a screenshot; it does not click, type, launch apps, or execute commands. This phase does not implement deletion, calendar changes, desktop actions, task memory, or arbitrary command execution.
+Registered tools are allowlisted and validate arguments with Pydantic. Search checks filename matches only, skips symlinks, reports inaccessible locations or limits as incomplete, and returns full paths. Create and copy operate only in the primary approved workspace and never overwrite an existing destination; they require `--approve`. Terminal commands run only in an approved directory; destructive commands are denied and all non-inspection commands require `--approve`. Browser access is read-only and rejects local/private destinations. Each application name requires one explicit `--approve` before it is persisted as trusted; launches use PATH, Windows App Paths, and limited standard-install discovery, then are verified by PID or executable name. Desktop access only reads accessibility information or captures a screenshot; it does not click or type. This phase does not implement deletion, calendar changes, desktop actions, task memory, or unrestricted command execution.

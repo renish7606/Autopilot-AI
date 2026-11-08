@@ -5,11 +5,12 @@ import stat
 import time
 from typing import Any
 
+from .approved_apps import ApprovedAppError, approve_app, is_app_approved
 from .planner import ClarificationRequired, ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
 from .policy import PathPolicy, PolicyError, command_risk
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
-from .verifier import verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open, verify_desktop_inspection
+from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open, verify_desktop_inspection
 
 
 class AmbiguousSearchScope(ValueError):
@@ -185,6 +186,13 @@ def run_goal(
             except PolicyError as exc:
                 return {"status": "denied", "goal": goal, "message": f"Command rejected: {exc}"}
             step = step.model_copy(update={"risk_level": risk_level, "requires_approval": requires_approval})
+        elif step.tool_name == "launch_app":
+            try:
+                app_is_trusted = is_app_approved(step.arguments["app_name"])
+            except ApprovedAppError as exc:
+                return {"status": "error", "goal": goal, "message": f"Approved-application policy could not be read: {exc}"}
+            if app_is_trusted:
+                step = step.model_copy(update={"requires_approval": False})
         try:
             if step.tool_name == "create_directory":
                 target = policy.resolve_new_path(step.arguments["path"])
@@ -197,6 +205,9 @@ def run_goal(
                 source = None
             elif step.tool_name == "run_command":
                 target = policy.resolve(step.arguments["working_dir"], step.arguments["root_index"])
+                source = None
+            elif step.tool_name == "launch_app":
+                target = None
                 source = None
             elif step.tool_name == "copy_file":
                 source = policy.resolve_path(step.arguments["source_path"], step.arguments.get("source_root_index", 0))
@@ -247,6 +258,8 @@ def run_goal(
                 )
             elif step.tool_name == "run_command":
                 verification = verify_command_execution(result)
+            elif step.tool_name == "launch_app":
+                verification = verify_app_launch(result)
             else:
                 return {"status": "denied", "goal": goal, "message": "No verifier is registered for the selected tool."}
             attempt_history.append({
@@ -258,6 +271,11 @@ def run_goal(
             })
             if not should_retry(step.tool_name, result, verification, attempt):
                 break
+        if step.tool_name == "launch_app" and approved and result.status == "success" and verification.passed:
+            try:
+                approve_app(step.arguments["app_name"])
+            except ApprovedAppError as exc:
+                result.output["warning"] = f"Application launched but its approval could not be saved: {exc}"
         step_reports.append({"plan": step.model_dump(), "tool_result": result.model_dump(), "verification": verification.model_dump(), "attempts": len(attempt_history), "attempt_history": attempt_history})
         if result.status != "success" or not verification.passed:
             break

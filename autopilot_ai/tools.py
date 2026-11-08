@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import hashlib
 import re
+import shutil
 import subprocess
 from typing import Any, Callable, Literal
 from uuid import uuid4
@@ -76,6 +77,37 @@ class RunCommandArgs(BaseModel):
     timeout_seconds: int = Field(default=30, ge=1, le=120)
     working_dir: str = Field(default=".", min_length=1, max_length=300)
     root_index: int = Field(default=0, ge=0)
+
+
+class LaunchAppArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    app_name: str = Field(min_length=1, max_length=100)
+    arguments: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("app_name")
+    @classmethod
+    def validate_app_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or not re.fullmatch(r"[A-Za-z0-9_. -]+", normalized):
+            raise ValueError("Application names may contain only letters, numbers, spaces, dots, underscores, and hyphens.")
+        return normalized
+
+
+APP_ALIASES = {
+    "notepad": "notepad.exe",
+    "calculator": "calc.exe",
+    "calc": "calc.exe",
+    "chrome": "chrome.exe",
+    "google chrome": "chrome.exe",
+    "edge": "msedge.exe",
+    "explorer": "explorer.exe",
+    "cmd": "cmd.exe",
+    "powershell": "powershell.exe",
+    "code": "code.cmd",
+    "vscode": "code.cmd",
+    "paint": "mspaint.exe",
+}
 
 
 def _create_directory(policy: PathPolicy, path: str) -> dict[str, Any]:
@@ -167,6 +199,54 @@ def _run_command(
         }
     except OSError as exc:
         raise ToolExecutionError(f"Command execution failed: {exc}") from exc
+
+
+def _resolve_app_executable(app_name: str) -> str:
+    target = shutil.which(app_name) or APP_ALIASES.get(app_name.casefold())
+    if not target:
+        raise ToolError(f"Application is not available on PATH: {app_name}")
+    executable = shutil.which(target)
+    if executable:
+        return executable
+    for candidate in _windows_app_candidates(target):
+        if candidate.is_file():
+            return str(candidate)
+    raise ToolError(f"Application is not available on PATH or in standard Windows locations: {app_name}")
+
+
+def _windows_app_candidates(target: str) -> list[Path]:
+    """Return safe Windows registry and standard-install candidates for an executable."""
+    candidates: list[Path] = []
+    try:
+        import winreg
+
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for key_path in (rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{target}", rf"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\{target}"):
+                try:
+                    with winreg.OpenKey(hive, key_path) as key:
+                        value, _ = winreg.QueryValueEx(key, None)
+                    path = Path(str(value).strip('"'))
+                    if path.is_file():
+                        candidates.append(path)
+                except OSError:
+                    continue
+    except ImportError:
+        return candidates
+    if target.casefold() == "chrome.exe":
+        for variable in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+            base = os.environ.get(variable)
+            if base:
+                candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    return candidates
+
+
+def _launch_app(policy: PathPolicy, app_name: str, arguments: list[str]) -> dict[str, Any]:
+    executable = _resolve_app_executable(app_name)
+    try:
+        process = subprocess.Popen([executable, *arguments])
+    except OSError as exc:
+        raise ToolExecutionError(f"Could not launch {app_name}: {exc}") from exc
+    return {"pid": process.pid, "app_name": app_name, "executable_path": executable}
 
 
 class ToolError(ValueError):
@@ -295,6 +375,7 @@ class ToolRegistry:
             "open_webpage": (OpenWebpageArgs, lambda policy, url: open_webpage(url)),
             "inspect_active_window": (InspectActiveWindowArgs, lambda policy, max_controls, screenshot_fallback: inspect_active_window(max_controls, screenshot_fallback)),
             "run_command": (RunCommandArgs, _run_command),
+            "launch_app": (LaunchAppArgs, _launch_app),
         }
 
     @property

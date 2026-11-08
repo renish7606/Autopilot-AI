@@ -186,6 +186,10 @@ def format_report(report: dict) -> str:
                     lines.append(f"  Output: {output['stdout'][:500]}")
                 if output.get("stderr"):
                     lines.append(f"  Error output: {output['stderr'][:500]}")
+            elif plan.get("tool_name") == "launch_app":
+                lines.append(f"  Application: {output.get('app_name', '(not available)')}")
+                lines.append(f"  Process ID: {output.get('pid', 'unknown')}")
+                lines.append(f"  Executable: {output.get('executable_path', '(not available)')}")
             elif plan.get("tool_name") == "open_webpage":
                 if result.get("status") == "success":
                     lines.append(f"  Page: {output.get('title', '(untitled)')} — {output.get('url', '')}")

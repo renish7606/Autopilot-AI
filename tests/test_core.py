@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 import pytest
 
 from autopilot_ai.approved_dirs import add_approved_dirs, clear_approved_dirs, load_approved_dirs, remove_approved_dirs
+from autopilot_ai.approved_apps import approve_app, is_app_approved, load_approved_apps
 from autopilot_ai.agent import _resolve_search_scope, run_goal
 from autopilot_ai.browser import BrowserToolError, _http_status_error, open_webpage
 from autopilot_ai.cli import format_report, render_report
@@ -18,8 +19,8 @@ from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_goal_ste
 from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
 from autopilot_ai.session_state import SessionState
-from autopilot_ai.tools import ToolRegistry
-from autopilot_ai.verifier import verify_command_execution, verify_desktop_inspection, verify_directory_listing, verify_webpage_open
+from autopilot_ai.tools import APP_ALIASES, ToolRegistry, _resolve_app_executable
+from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_inspection, verify_directory_listing, verify_webpage_open
 
 
 def test_run_command_safe_execution_is_verified(tmp_path: Path) -> None:
@@ -82,6 +83,91 @@ def test_run_command_is_never_retried(tmp_path: Path) -> None:
     verification = Verification(passed=False, summary="failed")
 
     assert should_retry("run_command", result, verification, attempt=1) is False
+
+
+def test_launch_app_alias_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    looked_up: list[str] = []
+
+    def fake_which(target: str) -> str | None:
+        looked_up.append(target)
+        return r"C:\Windows\System32\notepad.exe" if target == "notepad.exe" else None
+
+    monkeypatch.setattr("autopilot_ai.tools.shutil.which", fake_which)
+
+    executable = _resolve_app_executable("notepad")
+
+    assert APP_ALIASES["notepad"] == "notepad.exe"
+    assert executable.endswith("notepad.exe")
+    assert looked_up == ["notepad", "notepad.exe"]
+
+
+def test_launch_app_requires_approval(tmp_path: Path) -> None:
+    report = run_goal("Launch Notepad", tmp_path, planner="heuristic")
+
+    assert report["status"] == "approval_required"
+    assert report["plan"]["tool_name"] == "launch_app"
+    assert report["plan"]["requires_approval"] is True
+
+
+def test_launch_app_approval_persists_per_normalized_name(tmp_path: Path) -> None:
+    config = tmp_path / "approved_apps.json"
+
+    approve_app("  Notepad  ", config)
+
+    assert load_approved_apps(config) == {"notepad"}
+    assert is_app_approved("NOTEPAD", config) is True
+    assert is_app_approved("Chrome", config) is False
+
+
+def test_trusted_app_launch_does_not_require_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("autopilot_ai.agent.is_app_approved", lambda name: name == "Notepad")
+    monkeypatch.setattr(
+        ToolRegistry,
+        "execute",
+        lambda self, name, arguments: ToolResult(status="success", output={"pid": 4321, "app_name": "Notepad", "executable_path": r"C:\\Windows\\System32\\notepad.exe"}),
+    )
+    monkeypatch.setattr("autopilot_ai.agent.verify_app_launch", lambda result: Verification(passed=True, summary="verified"))
+
+    report = run_goal("Launch Notepad", tmp_path, planner="heuristic")
+
+    assert report["status"] == "completed"
+    assert report["plan"]["requires_approval"] is False
+
+
+def test_launch_app_uses_resolved_executable_and_returns_pid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    launched: list[list[str]] = []
+
+    class FakeProcess:
+        pid = 4321
+
+    monkeypatch.setattr("autopilot_ai.tools.shutil.which", lambda target: r"C:\Windows\System32\notepad.exe")
+    monkeypatch.setattr("autopilot_ai.tools.subprocess.Popen", lambda command: launched.append(command) or FakeProcess())
+
+    result = ToolRegistry(PathPolicy(tmp_path)).execute("launch_app", {"app_name": "notepad", "arguments": ["example.txt"]})
+
+    assert result.status == "success"
+    assert result.output == {"pid": 4321, "app_name": "notepad", "executable_path": r"C:\Windows\System32\notepad.exe"}
+    assert launched == [[r"C:\Windows\System32\notepad.exe", "example.txt"]]
+
+
+def test_launch_app_verifier_checks_active_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    class TasklistResult:
+        returncode = 0
+        stdout = '"notepad.exe","4321","Console","1","10 K"\n'
+
+    monkeypatch.setattr("autopilot_ai.verifier.time.sleep", lambda _: None)
+    monkeypatch.setattr("autopilot_ai.verifier.subprocess.run", lambda *args, **kwargs: TasklistResult())
+    verification = verify_app_launch(
+        ToolResult(status="success", output={"pid": 4321, "app_name": "notepad", "executable_path": r"C:\Windows\System32\notepad.exe"})
+    )
+
+    assert verification.passed is True
+    assert verification.evidence["pid_matches"] is True
+    assert verification.evidence["executable_matches"] is True
+
+
+def test_launch_app_is_never_retried() -> None:
+    assert should_retry("launch_app", ToolResult(status="error", error_code="desktop_error"), Verification(passed=False, summary="failed"), attempt=1) is False
 
 
 def test_run_command_schema_forbids_extra_or_coerced_arguments(tmp_path: Path) -> None:
