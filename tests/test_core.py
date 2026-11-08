@@ -20,7 +20,7 @@ from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
 from autopilot_ai.session_state import SessionState
 from autopilot_ai.tools import APP_ALIASES, ToolRegistry, _resolve_app_executable
-from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_inspection, verify_directory_listing, verify_webpage_open
+from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_inspection, verify_directory_listing, verify_file_contents, verify_webpage_open
 
 
 def test_run_command_safe_execution_is_verified(tmp_path: Path) -> None:
@@ -101,7 +101,8 @@ def test_launch_app_alias_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     assert looked_up == ["notepad", "notepad.exe"]
 
 
-def test_launch_app_requires_approval(tmp_path: Path) -> None:
+def test_launch_app_requires_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("autopilot_ai.agent.is_app_approved", lambda name: False)
     report = run_goal("Launch Notepad", tmp_path, planner="heuristic")
 
     assert report["status"] == "approval_required"
@@ -168,6 +169,65 @@ def test_launch_app_verifier_checks_active_pid(monkeypatch: pytest.MonkeyPatch) 
 
 def test_launch_app_is_never_retried() -> None:
     assert should_retry("launch_app", ToolResult(status="error", error_code="desktop_error"), Verification(passed=False, summary="failed"), attempt=1) is False
+
+
+def test_read_file_contents_runs_and_is_independently_verified(tmp_path: Path) -> None:
+    target = tmp_path / "notes.md"
+    target.write_text("# Notes\nImportant content", encoding="utf-8")
+
+    report = run_goal("Read file notes.md", tmp_path, planner="heuristic")
+
+    assert report["status"] == "completed"
+    assert report["plan"]["tool_name"] == "read_file_contents"
+    assert report["tool_result"]["output"]["content"] == "# Notes\nImportant content"
+    assert report["verification"]["passed"] is True
+
+
+def test_read_file_contents_is_confined_to_approved_workspace(tmp_path: Path) -> None:
+    result = ToolRegistry(PathPolicy(tmp_path)).execute("read_file_contents", {"path": "../outside.txt"})
+
+    assert result.status == "denied"
+    assert result.error_code == "policy_or_tool_error"
+
+
+def test_read_file_contents_truncates_and_verifier_detects_tampering(tmp_path: Path) -> None:
+    target = tmp_path / "large.txt"
+    target.write_text("x" * 150, encoding="utf-8")
+    result = ToolRegistry(PathPolicy(tmp_path)).execute(
+        "read_file_contents", {"path": "large.txt", "max_characters": 100}
+    )
+
+    assert result.status == "success"
+    assert result.output["content"] == "x" * 100
+    assert result.output["truncated"] is True
+    assert verify_file_contents(result, target, 100, None).passed is True
+    result.output["content"] = "altered"
+    assert verify_file_contents(result, target, 100, None).passed is False
+
+
+def test_read_pdf_contents_and_a_selected_page(tmp_path: Path) -> None:
+    from pypdf import PdfWriter
+
+    target = tmp_path / "sample.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    with target.open("wb") as stream:
+        writer.write(stream)
+
+    result = ToolRegistry(PathPolicy(tmp_path)).execute(
+        "read_file_contents", {"path": "sample.pdf", "page_number": 1}
+    )
+
+    assert result.status == "success"
+    assert result.output["file_type"] == "pdf"
+    assert result.output["page_number"] == 1
+    assert verify_file_contents(result, target, 8000, 1).passed is True
+
+
+def test_read_file_contents_is_retryable_after_transient_read_error() -> None:
+    assert should_retry(
+        "read_file_contents", ToolResult(status="error", error_code="filesystem_error"), Verification(passed=False, summary="failed"), attempt=1
+    ) is True
 
 
 def test_run_command_schema_forbids_extra_or_coerced_arguments(tmp_path: Path) -> None:

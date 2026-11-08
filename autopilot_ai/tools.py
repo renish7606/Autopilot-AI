@@ -110,6 +110,22 @@ APP_ALIASES = {
 }
 
 
+class ReadFileContentsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=300)
+    root_index: int = Field(default=0, ge=0)
+    max_characters: int = Field(default=8000, ge=100, le=50000)
+    page_number: int | None = Field(default=None, ge=1)
+
+
+_TEXT_FILE_SUFFIXES = frozenset({
+    ".txt", ".log", ".md", ".markdown", ".rst", ".json", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".py", ".pyi", ".js", ".ts", ".tsx", ".jsx", ".html", ".htm", ".css", ".xml", ".sql", ".sh",
+    ".ps1", ".bat", ".cmd", ".c", ".h", ".cpp", ".hpp", ".cs", ".java", ".go", ".rs", ".rb", ".php",
+})
+
+
 def _create_directory(policy: PathPolicy, path: str) -> dict[str, Any]:
     destination = policy.resolve_new_path(path)
     destination.mkdir()
@@ -249,6 +265,55 @@ def _launch_app(policy: PathPolicy, app_name: str, arguments: list[str]) -> dict
     return {"pid": process.pid, "app_name": app_name, "executable_path": executable}
 
 
+def _read_file_contents(
+    policy: PathPolicy,
+    path: str,
+    root_index: int,
+    max_characters: int,
+    page_number: int | None,
+) -> dict[str, Any]:
+    file_path = policy.resolve_path(path, root_index)
+    if not file_path.is_file():
+        raise ToolError("The requested path must be an existing regular file.")
+    try:
+        size_bytes = file_path.stat().st_size
+        digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        if file_path.suffix.casefold() == ".pdf":
+            from pypdf import PdfReader
+
+            reader = PdfReader(file_path)
+            if reader.is_encrypted:
+                raise ToolError("Encrypted PDF files are not supported.")
+            if page_number is not None:
+                if page_number > len(reader.pages):
+                    raise ToolError("The requested PDF page does not exist.")
+                content = reader.pages[page_number - 1].extract_text() or ""
+            else:
+                content = "\n".join(page.extract_text() or "" for page in reader.pages)
+            file_type = "pdf"
+        else:
+            if page_number is not None:
+                raise ToolError("page_number is supported only for PDF files.")
+            if file_path.suffix.casefold() not in _TEXT_FILE_SUFFIXES:
+                raise ToolError("Only supported text, code, data, Markdown, and PDF files can be read.")
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            file_type = "text"
+    except ToolError:
+        raise
+    except Exception as exc:
+        raise ToolExecutionError(f"Could not read file contents: {exc}") from exc
+    return {
+        "path": str(file_path),
+        "file_type": file_type,
+        "page_number": page_number,
+        "size_bytes": size_bytes,
+        "sha256": digest,
+        "content": content[:max_characters],
+        "total_characters": len(content),
+        "truncated": len(content) > max_characters,
+    }
+
+
 class ToolError(ValueError):
     pass
 
@@ -376,6 +441,7 @@ class ToolRegistry:
             "inspect_active_window": (InspectActiveWindowArgs, lambda policy, max_controls, screenshot_fallback: inspect_active_window(max_controls, screenshot_fallback)),
             "run_command": (RunCommandArgs, _run_command),
             "launch_app": (LaunchAppArgs, _launch_app),
+            "read_file_contents": (ReadFileContentsArgs, _read_file_contents),
         }
 
     @property

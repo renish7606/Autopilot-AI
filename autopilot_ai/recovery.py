@@ -6,7 +6,7 @@ from .contracts import ToolResult, Verification
 
 
 MAX_ATTEMPTS = 2
-RETRYABLE_READ_ONLY_TOOLS = frozenset({"list_directory", "search_files", "open_webpage", "inspect_active_window"})
+RETRYABLE_READ_ONLY_TOOLS = frozenset({"list_directory", "search_files", "open_webpage", "inspect_active_window", "read_file_contents"})
 NON_RETRYABLE_MUTATING_TOOLS = frozenset({"create_directory", "copy_file", "run_command", "launch_app"})
 
 
@@ -23,7 +23,7 @@ def should_retry(tool_name: str, result: ToolResult, verification: Verification,
         detail = str(result.output.get("detail", ""))
         if result.error_code == "browser_error" and re.search(r"\bHTTP\s+4\d{2}\b", detail, re.IGNORECASE):
             return False
-        return result.error_code in {"browser_error", "desktop_error"}
+        return result.error_code in {"browser_error", "desktop_error", "filesystem_error"}
     if result.status == "success" and not verification.passed:
         if tool_name == "search_files" and result.output.get("complete") is False:
             return False

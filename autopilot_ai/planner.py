@@ -157,6 +157,24 @@ def plan_goal(goal: str) -> PlanStep:
             risk_level="medium",
             requires_approval=True,
         )
+    read_match = re.fullmatch(
+        r"(?:please\s+)?(?:read|show\s+contents?\s+of|view|cat|print\s+contents?\s+of)\s+(?:file\s+)?(.+?)",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    )
+    if read_match:
+        path = read_match.group(1).strip().strip("\"'")
+        if not path:
+            raise ClarificationRequired("Which file should I read?")
+        return PlanStep(
+            step_id="step-1",
+            description="Read the contents of an approved file.",
+            tool_name="read_file_contents",
+            arguments={"path": path, "root_index": 0, "max_characters": 8000},
+            expected_result="A fresh disk read matches the returned content and file digest.",
+            risk_level="low",
+            requires_approval=False,
+        )
     create_match = re.fullmatch(
         r"(?:please\s+)?(?:create|make)\s+(?:me\s+)?(?:a\s+)?(?:new\s+)?(?:folder|directory)(?:\s+(?:named|called))?\s+(.+)",
         goal.strip(),
@@ -338,10 +356,10 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
     """Ask the local model for a short plan; validate it but never execute it here."""
     system = (
         "You are a constrained planner. Return a JSON object matching the schema with an ordered steps array of 1 to 3 steps. "
-        "Only use list_directory, search_files, open_webpage, inspect_active_window, run_command, and launch_app. open_webpage reads visible text from a public HTTP or HTTPS page. "
+        "Only use list_directory, search_files, read_file_contents, open_webpage, inspect_active_window, run_command, and launch_app. open_webpage reads visible text from a public HTTP or HTTPS page. "
         "inspect_active_window reads visible controls from the current Windows window, with an optional screenshot fallback. Never click or type. "
         "list_directory lists immediate entries in the primary approved workspace. "
-        "search_files searches filenames across explicitly approved roots; never search contents. Use relative path '.'. run_command runs a shell command only in an approved relative working_dir; destructive commands are forbidden and non-inspection commands require approval. launch_app starts one installed Windows application with an optional arguments list and always requires approval. "
+        "search_files searches filenames across explicitly approved roots; never search contents. read_file_contents reads one existing relative text, code, data, Markdown, or PDF file from an approved root, with path and optional page_number for PDFs. Use relative path '.'. run_command runs a shell command only in an approved relative working_dir; destructive commands are forbidden and non-inspection commands require approval. launch_app starts one installed Windows application with an optional arguments list and always requires approval. "
         "For exact filename search use query equal to the filename and match_mode='exact'; for a requested partial name use "
         "match_mode='contains'. For file-type search, use query='' and the exact extensions list requested by the user; "
         "when the user names a folder, use that folder as path and root_index=0 (the primary approved workspace), after deterministic parsing; "
@@ -364,6 +382,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
         "inspect_active_window": ("Inspect the active desktop window using Windows UI Automation.", "A fresh UI Automation read or a saved screenshot confirms the active window state."),
         "run_command": ("Run a terminal command in the approved working directory.", "The command exits successfully and its process result is independently checked."),
         "launch_app": ("Launch an installed Windows application.", "Windows reports the launched process as active."),
+        "read_file_contents": ("Read the contents of an approved file.", "A fresh disk read matches the returned content and file digest."),
     }
     normalized: list[PlanStep] = []
     for index, step in enumerate(task_plan.steps, start=1):

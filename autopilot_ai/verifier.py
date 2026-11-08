@@ -58,6 +58,52 @@ def verify_app_launch(result: ToolResult) -> Verification:
     )
 
 
+def verify_file_contents(result: ToolResult, file_path: Path, max_characters: int, page_number: int | None) -> Verification:
+    """Re-read the approved file and compare its digest and returned content slice."""
+    if result.status != "success":
+        return Verification(passed=False, summary="File read did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})
+    try:
+        if not file_path.is_file() or file_path.is_symlink():
+            return Verification(passed=False, summary="The requested file is no longer a regular file.", evidence={"path": str(file_path)})
+        payload = file_path.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        if file_path.suffix.casefold() == ".pdf":
+            from pypdf import PdfReader
+
+            reader = PdfReader(file_path)
+            if reader.is_encrypted:
+                return Verification(passed=False, summary="The PDF became encrypted before verification.")
+            if page_number is not None:
+                if page_number > len(reader.pages):
+                    return Verification(passed=False, summary="The requested PDF page no longer exists.")
+                fresh_content = reader.pages[page_number - 1].extract_text() or ""
+            else:
+                fresh_content = "\n".join(page.extract_text() or "" for page in reader.pages)
+        else:
+            if page_number is not None:
+                return Verification(passed=False, summary="A page number was supplied for a non-PDF file.")
+            fresh_content = file_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return Verification(passed=False, summary="A fresh file read could not verify the returned content.", evidence={"error": str(exc)})
+    output = result.output
+    content_matches = output.get("content") == fresh_content[:max_characters]
+    metadata_matches = (
+        output.get("path") == str(file_path)
+        and output.get("file_type") == ("pdf" if file_path.suffix.casefold() == ".pdf" else "text")
+        and output.get("size_bytes") == len(payload)
+        and output.get("sha256") == digest
+        and output.get("page_number") == page_number
+        and output.get("total_characters") == len(fresh_content)
+        and output.get("truncated") is (len(fresh_content) > max_characters)
+    )
+    passed = content_matches and metadata_matches
+    return Verification(
+        passed=passed,
+        summary="File contents independently verified from a fresh disk read." if passed else "Returned file content or metadata differs from a fresh disk read.",
+        evidence={"path": str(file_path), "sha256": digest, "content_matches": content_matches, "metadata_matches": metadata_matches},
+    )
+
+
 def verify_directory_listing(result: ToolResult, directory: Path) -> Verification:
     if result.status != "success":
         return Verification(passed=False, summary="Tool did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})

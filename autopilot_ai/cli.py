@@ -24,9 +24,9 @@ def main() -> None:
         type=Path,
         action="append",
         default=[],
-        help="Additional existing directory approved for filename search; may be repeated.",
+        help="Additional existing directory approved for filename search and file reading; may be repeated.",
     )
-    parser.add_argument("--approve-dir", type=Path, action="append", default=[], help="Permanently add an existing directory to the local search allowlist (stored under data/ on D:).")
+    parser.add_argument("--approve-dir", type=Path, action="append", default=[], help="Permanently add an existing directory to the local search and file-read allowlist (stored under data/ on D:).")
     parser.add_argument("--unapprove-dir", type=Path, action="append", default=[], help="Remove a directory from the persistent search allowlist.")
     parser.add_argument("--list-approved-dirs", action="store_true", help="Show the persistent search allowlist.")
     parser.add_argument("--clear-approved-dirs", action="store_true", help="Clear the persistent search allowlist.")
@@ -190,6 +190,15 @@ def format_report(report: dict) -> str:
                 lines.append(f"  Application: {output.get('app_name', '(not available)')}")
                 lines.append(f"  Process ID: {output.get('pid', 'unknown')}")
                 lines.append(f"  Executable: {output.get('executable_path', '(not available)')}")
+            elif plan.get("tool_name") == "read_file_contents":
+                lines.append(f"  File: {output.get('path', '(not available)')}")
+                if output.get("page_number") is not None:
+                    lines.append(f"  PDF page: {output['page_number']}")
+                content = output.get("content")
+                if isinstance(content, str):
+                    lines.append(f"  Content: {content[:1000]}")
+                if output.get("truncated"):
+                    lines.append("  Output was truncated; use --debug for the full returned slice metadata.")
             elif plan.get("tool_name") == "open_webpage":
                 if result.get("status") == "success":
                     lines.append(f"  Page: {output.get('title', '(untitled)')} — {output.get('url', '')}")
@@ -246,11 +255,12 @@ def format_report(report: dict) -> str:
         candidates = report.get("candidates", [])
         if candidates:
             candidate_kind = report.get("candidate_kind", report.get("scope_kind", "folder_scope"))
-            heading = "Matching search results:" if candidate_kind == "search_result" else "Matching approved folders:"
+            heading = "Matching search results:" if candidate_kind == "search_result" else ("Matching approved files:" if candidate_kind == "read_file" else "Matching approved folders:")
             lines.append(heading)
             lines.extend(f"  {index}) {candidate}" for index, candidate in enumerate(candidates, start=1))
             if not report.get("follow_up_question"):
-                lines.append("Next: repeat the request with the exact folder path from this list.")
+                next_hint = "Next: repeat the request with the exact file path from this list." if candidate_kind == "read_file" else "Next: repeat the request with the exact folder path from this list."
+                lines.append(next_hint)
     if report.get("follow_up_question"):
         lines.append(f"Follow-up: {report['follow_up_question']} Reply with a number or ordinal (for example, 'the second one').")
     elif status == "unsupported":

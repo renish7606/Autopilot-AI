@@ -1,6 +1,7 @@
 """One bounded receive-plan-policy-execute-verify cycle."""
 
 from pathlib import Path
+import os
 import stat
 import time
 from typing import Any
@@ -10,7 +11,7 @@ from .planner import ClarificationRequired, ModelPlannerError, PlanningError, pl
 from .policy import PathPolicy, PolicyError, command_risk
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
-from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open, verify_desktop_inspection
+from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_desktop_inspection
 
 
 class AmbiguousSearchScope(ValueError):
@@ -18,6 +19,76 @@ class AmbiguousSearchScope(ValueError):
         super().__init__(folder)
         self.folder = folder
         self.candidates = candidates
+
+
+class AmbiguousReadFile(ValueError):
+    def __init__(self, requested: str, candidates: list[Path]) -> None:
+        super().__init__(requested)
+        self.requested = requested
+        self.candidates = candidates
+
+
+def _resolve_read_scope(policy: PathPolicy, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a read request to one regular file under an approved root."""
+    requested_text = str(arguments["path"])
+    requested = Path(requested_text).expanduser()
+    matches: dict[str, tuple[Path, int, str]] = {}
+    if requested.is_absolute() or requested.drive:
+        try:
+            absolute = requested.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise PolicyError("The requested file does not exist or cannot be resolved.") from exc
+        for index, root in enumerate(policy.approved_roots):
+            try:
+                relative = absolute.relative_to(root)
+            except ValueError:
+                continue
+            relative_text = str(relative) if relative.parts else "."
+            candidate = policy.resolve_path(relative_text, index)
+            if candidate == absolute and candidate.is_file():
+                matches[str(candidate).casefold()] = (candidate, index, relative_text)
+    else:
+        for index, root in enumerate(policy.approved_roots):
+            try:
+                candidate = policy.resolve_path(requested_text, index)
+            except (PolicyError, OSError):
+                continue
+            if candidate.is_file():
+                matches[str(candidate).casefold()] = (candidate, index, requested_text)
+
+        if len(requested.parts) == 1 and not matches:
+            for index, root in enumerate(policy.approved_roots):
+                for current, directories, files in os.walk(root, followlinks=False):
+                    current_path = Path(current)
+                    directories.sort(key=str.casefold)
+                    files.sort(key=str.casefold)
+                    directories[:] = [
+                        name for name in directories
+                        if not (current_path / name).is_symlink()
+                    ]
+                    for filename in files:
+                        if filename.casefold() != requested.name.casefold():
+                            continue
+                        candidate = current_path / filename
+                        if candidate.is_symlink() or not candidate.is_file():
+                            continue
+                        relative_text = str(candidate.relative_to(root))
+                        try:
+                            safe_candidate = policy.resolve_path(relative_text, index)
+                        except (PolicyError, OSError):
+                            continue
+                        matches[str(safe_candidate).casefold()] = (safe_candidate, index, relative_text)
+
+    candidates = list(matches.values())
+    if not candidates:
+        raise PolicyError(
+            f"No file named '{requested.name}' was found inside the approved directories. "
+            "Set --workspace or approve the directory containing the file."
+        )
+    if len(candidates) > 1:
+        raise AmbiguousReadFile(requested_text, [candidate[0] for candidate in candidates])
+    file_path, root_index, relative_path = candidates[0]
+    return {**arguments, "path": relative_path, "root_index": root_index}
 
 
 def _resolve_search_scope(policy: PathPolicy, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -169,6 +240,20 @@ def run_goal(
                 }
             except (TypeError, ValueError, OSError, RuntimeError) as exc:
                 return {"status": "denied", "goal": goal, "message": f"Search folder rejected: {exc}"}
+        elif step.tool_name == "read_file_contents":
+            try:
+                resolved_scope = _resolve_read_scope(policy, step.arguments)
+                step = step.model_copy(update={"arguments": resolved_scope})
+            except AmbiguousReadFile as exc:
+                return {
+                    "status": "clarification_required",
+                    "goal": goal,
+                    "question": f"More than one approved file matches '{exc.requested}'. Specify its relative path or full path.",
+                    "candidates": [str(candidate) for candidate in exc.candidates],
+                    "candidate_kind": "read_file",
+                }
+            except (TypeError, ValueError, OSError, RuntimeError) as exc:
+                return {"status": "denied", "goal": goal, "message": f"File path rejected: {exc}"}
         try:
             validated_arguments = registry.validate_arguments(step.tool_name, step.arguments)
         except ToolArgumentsError as exc:
@@ -208,6 +293,11 @@ def run_goal(
                 source = None
             elif step.tool_name == "launch_app":
                 target = None
+                source = None
+            elif step.tool_name == "read_file_contents":
+                target = policy.resolve_path(step.arguments["path"], step.arguments["root_index"])
+                if not target.is_file():
+                    return {"status": "denied", "goal": goal, "message": "The requested path must be an existing regular file inside an approved directory."}
                 source = None
             elif step.tool_name == "copy_file":
                 source = policy.resolve_path(step.arguments["source_path"], step.arguments.get("source_root_index", 0))
@@ -260,6 +350,8 @@ def run_goal(
                 verification = verify_command_execution(result)
             elif step.tool_name == "launch_app":
                 verification = verify_app_launch(result)
+            elif step.tool_name == "read_file_contents":
+                verification = verify_file_contents(result, target, step.arguments["max_characters"], step.arguments["page_number"])
             else:
                 return {"status": "denied", "goal": goal, "message": "No verifier is registered for the selected tool."}
             attempt_history.append({
