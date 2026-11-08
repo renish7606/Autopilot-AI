@@ -180,6 +180,12 @@ def format_report(report: dict) -> str:
             elif plan.get("tool_name") == "copy_file":
                 lines.append(f"  Copied to: {output.get('destination', '(not available)')}")
                 lines.append(f"  Size: {output.get('size_bytes', 'unknown')} bytes")
+            elif plan.get("tool_name") == "run_command":
+                lines.append(f"  Exit code: {output.get('exit_code', 'unknown')}")
+                if output.get("stdout"):
+                    lines.append(f"  Output: {output['stdout'][:500]}")
+                if output.get("stderr"):
+                    lines.append(f"  Error output: {output['stderr'][:500]}")
             elif plan.get("tool_name") == "open_webpage":
                 if result.get("status") == "success":
                     lines.append(f"  Page: {output.get('title', '(untitled)')} — {output.get('url', '')}")

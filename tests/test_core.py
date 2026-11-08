@@ -19,7 +19,81 @@ from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
 from autopilot_ai.session_state import SessionState
 from autopilot_ai.tools import ToolRegistry
-from autopilot_ai.verifier import verify_desktop_inspection, verify_directory_listing, verify_webpage_open
+from autopilot_ai.verifier import verify_command_execution, verify_desktop_inspection, verify_directory_listing, verify_webpage_open
+
+
+def test_run_command_safe_execution_is_verified(tmp_path: Path) -> None:
+    report = run_goal("Run command 'echo test'", tmp_path, planner="heuristic")
+
+    assert report["status"] == "completed"
+    assert report["plan"]["tool_name"] == "run_command"
+    assert report["plan"]["requires_approval"] is False
+    assert report["tool_result"]["output"]["exit_code"] == 0
+    assert "test" in report["tool_result"]["output"]["stdout"]
+    assert report["verification"]["passed"] is True
+
+
+def test_run_command_working_directory_cannot_escape_approved_workspace(tmp_path: Path) -> None:
+    result = ToolRegistry(PathPolicy(tmp_path)).execute(
+        "run_command", {"command": "echo test", "working_dir": ".."}
+    )
+
+    assert result.status == "denied"
+    assert result.error_code == "policy_or_tool_error"
+
+
+def test_run_command_timeout_is_reported_and_fails_verification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    def timed_out(*args: object, **kwargs: object) -> object:
+        raise subprocess.TimeoutExpired("echo test", 1, output=b"partial output")
+
+    monkeypatch.setattr("autopilot_ai.tools.subprocess.run", timed_out)
+    result = ToolRegistry(PathPolicy(tmp_path)).execute(
+        "run_command", {"command": "echo test", "timeout_seconds": 1}
+    )
+    verification = verify_command_execution(result)
+
+    assert result.status == "success"
+    assert result.output["timed_out"] is True
+    assert result.output["exit_code"] == -1
+    assert result.output["stdout"] == "partial output"
+    assert verification.passed is False
+
+
+def test_run_command_non_whitelisted_command_requires_approval(tmp_path: Path) -> None:
+    report = run_goal("Run command python --help", tmp_path, planner="heuristic")
+
+    assert report["status"] == "approval_required"
+    assert report["plan"]["tool_name"] == "run_command"
+    assert report["plan"]["risk_level"] == "medium"
+    assert report["plan"]["requires_approval"] is True
+
+
+def test_run_command_destructive_command_is_denied_by_policy(tmp_path: Path) -> None:
+    report = run_goal("Run in CMD command shutdown", tmp_path, planner="heuristic")
+
+    assert report["status"] == "denied"
+    assert "destructive-command policy" in report["message"]
+
+
+def test_run_command_is_never_retried(tmp_path: Path) -> None:
+    result = ToolResult(status="error", error_code="filesystem_error")
+    verification = Verification(passed=False, summary="failed")
+
+    assert should_retry("run_command", result, verification, attempt=1) is False
+
+
+def test_run_command_schema_forbids_extra_or_coerced_arguments(tmp_path: Path) -> None:
+    registry = ToolRegistry(PathPolicy(tmp_path))
+
+    extra = registry.execute("run_command", {"command": "echo test", "unexpected": True})
+    coerced_timeout = registry.execute("run_command", {"command": "echo test", "timeout_seconds": "1"})
+
+    assert extra.status == "denied"
+    assert extra.error_code == "invalid_arguments"
+    assert coerced_timeout.status == "denied"
+    assert coerced_timeout.error_code == "invalid_arguments"
 
 
 def test_natural_language_listing_runs_and_verifies(tmp_path: Path) -> None:

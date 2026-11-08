@@ -6,10 +6,10 @@ import time
 from typing import Any
 
 from .planner import ClarificationRequired, ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
-from .policy import PathPolicy, PolicyError
+from .policy import PathPolicy, PolicyError, command_risk
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
-from .verifier import verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open, verify_desktop_inspection
+from .verifier import verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_search, verify_webpage_open, verify_desktop_inspection
 
 
 class AmbiguousSearchScope(ValueError):
@@ -100,7 +100,7 @@ def run_goal(
             try:
                 expected_steps = plan_goal_steps(goal)
                 if len(expected_steps) > 1:
-                    proposed_steps = plan_with_ollama_steps(goal, ("list_directory", "search_files"))
+                    proposed_steps = plan_with_ollama_steps(goal, registry.names)
                     if len(proposed_steps) == len(expected_steps) and all(_matches_intent(proposed, expected, registry) for proposed, expected in zip(proposed_steps, expected_steps)):
                         steps = proposed_steps
                     else:
@@ -179,6 +179,12 @@ def run_goal(
                 "argument_errors": exc.detail,
             }
         step = step.model_copy(update={"arguments": validated_arguments})
+        if step.tool_name == "run_command":
+            try:
+                risk_level, requires_approval = command_risk(step.arguments["command"])
+            except PolicyError as exc:
+                return {"status": "denied", "goal": goal, "message": f"Command rejected: {exc}"}
+            step = step.model_copy(update={"risk_level": risk_level, "requires_approval": requires_approval})
         try:
             if step.tool_name == "create_directory":
                 target = policy.resolve_new_path(step.arguments["path"])
@@ -188,6 +194,9 @@ def run_goal(
                 source = None
             elif step.tool_name == "inspect_active_window":
                 target = None
+                source = None
+            elif step.tool_name == "run_command":
+                target = policy.resolve(step.arguments["working_dir"], step.arguments["root_index"])
                 source = None
             elif step.tool_name == "copy_file":
                 source = policy.resolve_path(step.arguments["source_path"], step.arguments.get("source_root_index", 0))
@@ -211,7 +220,7 @@ def run_goal(
         except (TypeError, ValueError, OSError, RuntimeError) as exc:
             return {"status": "denied", "goal": goal, "message": f"Plan path rejected: {exc}"}
         if step.requires_approval and not approved:
-            return {"status": "approval_required", "goal": goal, "planner": planner_used, "plan": step.model_dump(), "message": "This file operation will change the filesystem. Review the plan, then rerun with --approve to execute it."}
+            return {"status": "approval_required", "goal": goal, "planner": planner_used, "plan": step.model_dump(), "message": "This operation requires approval. Review the plan, then rerun with --approve to execute it."}
         if step.tool_name == "inspect_active_window" and desktop_delay_seconds:
             time.sleep(desktop_delay_seconds)
         attempt_history = []
@@ -236,6 +245,8 @@ def run_goal(
                     step.arguments.get("max_results", 100),
                     step.arguments.get("extensions", []),
                 )
+            elif step.tool_name == "run_command":
+                verification = verify_command_execution(result)
             else:
                 return {"status": "denied", "goal": goal, "message": "No verifier is registered for the selected tool."}
             attempt_history.append({

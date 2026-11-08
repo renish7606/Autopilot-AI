@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import hashlib
 import re
+import subprocess
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
@@ -13,7 +14,7 @@ from .browser import BrowserPolicyError, BrowserToolError, OpenWebpageArgs, open
 from .contracts import ToolResult
 from .desktop import DesktopToolError, inspect_active_window
 from .filename_matching import matches_filename
-from .policy import PathPolicy
+from .policy import PathPolicy, command_risk
 
 
 class ListDirectoryArgs(BaseModel):
@@ -68,6 +69,15 @@ class InspectActiveWindowArgs(BaseModel):
     screenshot_fallback: bool = True
 
 
+class RunCommandArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    command: str = Field(min_length=1, max_length=1000)
+    timeout_seconds: int = Field(default=30, ge=1, le=120)
+    working_dir: str = Field(default=".", min_length=1, max_length=300)
+    root_index: int = Field(default=0, ge=0)
+
+
 def _create_directory(policy: PathPolicy, path: str) -> dict[str, Any]:
     destination = policy.resolve_new_path(path)
     destination.mkdir()
@@ -114,6 +124,49 @@ def _copy_file(policy: PathPolicy, source_path: str, destination_path: str, sour
     if cleanup_warning:
         output["warning"] = cleanup_warning
     return output
+
+
+def _run_command(
+    policy: PathPolicy,
+    command: str,
+    timeout_seconds: int,
+    working_dir: str,
+    root_index: int,
+) -> dict[str, Any]:
+    command_risk(command)
+    cwd = policy.resolve(working_dir, root_index)
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return {
+            "command": command,
+            "exit_code": proc.returncode,
+            "stdout": proc.stdout[:8000],
+            "stderr": proc.stderr[:4000],
+            "timed_out": False,
+            "cwd": str(cwd),
+        }
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "Command timed out.")
+        return {
+            "command": command,
+            "exit_code": -1,
+            "stdout": stdout[:4000],
+            "stderr": stderr[:4000],
+            "timed_out": True,
+            "cwd": str(cwd),
+        }
+    except OSError as exc:
+        raise ToolExecutionError(f"Command execution failed: {exc}") from exc
 
 
 class ToolError(ValueError):
@@ -241,6 +294,7 @@ class ToolRegistry:
             "copy_file": (CopyFileArgs, _copy_file),
             "open_webpage": (OpenWebpageArgs, lambda policy, url: open_webpage(url)),
             "inspect_active_window": (InspectActiveWindowArgs, lambda policy, max_controls, screenshot_fallback: inspect_active_window(max_controls, screenshot_fallback)),
+            "run_command": (RunCommandArgs, _run_command),
         }
 
     @property

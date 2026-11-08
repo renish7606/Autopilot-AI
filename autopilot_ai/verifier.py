@@ -10,6 +10,16 @@ from .desktop import DesktopToolError, inspect_active_window
 from .filename_matching import matches_filename
 
 
+def verify_command_execution(result: ToolResult) -> Verification:
+    """Verify the command outcome from its structured process result."""
+    if result.status != "success":
+        return Verification(passed=False, summary="Command failed to execute.", evidence={"status": result.status, "error_code": result.error_code})
+    out = result.output
+    passed = isinstance(out.get("exit_code"), int) and out.get("timed_out") is False and out.get("exit_code") == 0
+    summary = "Command completed successfully with exit code 0." if passed else f"Command finished with exit code {out.get('exit_code')} or timed out."
+    return Verification(passed=passed, summary=summary, evidence=out)
+
+
 def verify_directory_listing(result: ToolResult, directory: Path) -> Verification:
     if result.status != "success":
         return Verification(passed=False, summary="Tool did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})

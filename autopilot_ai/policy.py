@@ -2,10 +2,38 @@
 
 from pathlib import Path
 from collections.abc import Iterable
+import re
 
 
 class PolicyError(ValueError):
     """Raised when a request crosses the configured filesystem boundary."""
+
+
+_DESTRUCTIVE_COMMAND_PATTERNS = (
+    r"\brmdir\b[^&|;]*[a-z]:\\",
+    r"\bformat\b",
+    r"\bdel\b[^&|;]*[a-z]:\\",
+    r"\bdrop\s+database\b",
+    r"\bshutdown\b",
+    r"\bmkfs\b",
+)
+_SAFE_INSPECTION_COMMAND = re.compile(
+    r"(?:dir(?:\s+[^&|;<>]*)?|echo\s+.+|ipconfig(?:\s+[^&|;<>]*)?|"
+    r"git\s+status(?:\s+[^&|;<>]*)?|python\s+--version|pip\s+list(?:\s+[^&|;<>]*)?)\Z",
+    re.IGNORECASE,
+)
+
+
+def command_risk(command: str) -> tuple[str, bool]:
+    """Classify an allowed shell command without attempting to sanitize it."""
+    normalized = " ".join(command.casefold().split())
+    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _DESTRUCTIVE_COMMAND_PATTERNS):
+        raise PolicyError("The command is blocked by the destructive-command policy.")
+    if _SAFE_INSPECTION_COMMAND.fullmatch(normalized):
+        return "low", False
+    if any(token in normalized for token in ("&", "|", ";", ">", "<")):
+        return "high", True
+    return "medium", True
 
 
 class PathPolicy:

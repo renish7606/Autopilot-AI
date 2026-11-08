@@ -7,11 +7,17 @@ from .contracts import ToolResult, Verification
 
 MAX_ATTEMPTS = 2
 RETRYABLE_READ_ONLY_TOOLS = frozenset({"list_directory", "search_files", "open_webpage", "inspect_active_window"})
+NON_RETRYABLE_MUTATING_TOOLS = frozenset({"create_directory", "copy_file", "run_command"})
 
 
 def should_retry(tool_name: str, result: ToolResult, verification: Verification, attempt: int) -> bool:
     """Retry at most once, and never repeat a mutating operation."""
-    if attempt >= MAX_ATTEMPTS or tool_name not in RETRYABLE_READ_ONLY_TOOLS or result.status == "denied":
+    if (
+        attempt >= MAX_ATTEMPTS
+        or tool_name in NON_RETRYABLE_MUTATING_TOOLS
+        or tool_name not in RETRYABLE_READ_ONLY_TOOLS
+        or result.status == "denied"
+    ):
         return False
     if result.status == "error":
         detail = str(result.output.get("detail", ""))
