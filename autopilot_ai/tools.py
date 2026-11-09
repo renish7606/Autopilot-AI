@@ -197,16 +197,24 @@ def _write_file(policy: PathPolicy, path: str, content: str, mode: str, root_ind
 
     content_bytes = content.encode("utf-8")
     try:
-        initial_content = destination.read_bytes() if mode == "append" else b""
-        final_content = initial_content + content_bytes
         temporary = destination.with_name(f".{destination.name}.tmp.{uuid4().hex}")
         temporary_created = False
         published = False
         cleanup_warning = None
+        digest = hashlib.sha256()
+        size_bytes = 0
         try:
             with temporary.open("xb") as stream:
                 temporary_created = True
-                stream.write(final_content)
+                if mode == "append":
+                    with destination.open("rb") as source_stream:
+                        while chunk := source_stream.read(1024 * 1024):
+                            stream.write(chunk)
+                            digest.update(chunk)
+                            size_bytes += len(chunk)
+                stream.write(content_bytes)
+                digest.update(content_bytes)
+                size_bytes += len(content_bytes)
                 stream.flush()
                 os.fsync(stream.fileno())
             if mode == "create_new":
@@ -237,8 +245,8 @@ def _write_file(policy: PathPolicy, path: str, content: str, mode: str, root_ind
         "path": str(destination),
         "mode": mode,
         "bytes_written": len(content_bytes),
-        "size_bytes": len(final_content),
-        "sha256": hashlib.sha256(final_content).hexdigest(),
+        "size_bytes": size_bytes,
+        "sha256": digest.hexdigest(),
     }
     if cleanup_warning:
         output["warning"] = cleanup_warning

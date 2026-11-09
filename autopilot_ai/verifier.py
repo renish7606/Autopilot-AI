@@ -275,24 +275,40 @@ def verify_written_file(result: ToolResult, destination: Path, content: str, mod
     if result.status != "success" or not destination.is_file() or destination.is_symlink():
         return Verification(passed=False, summary="Written file is missing or the tool failed.", evidence={"path": str(destination), "exists": destination.is_file()})
     try:
-        payload = destination.read_bytes()
+        content_bytes = content.encode("utf-8")
+        digest = hashlib.sha256()
+        size_bytes = 0
+        observed_content = bytearray()
+        tail = bytearray()
+        with destination.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                size_bytes += len(chunk)
+                if mode in {"create_new", "overwrite"} and len(observed_content) <= len(content_bytes):
+                    observed_content.extend(chunk[:len(content_bytes) + 1 - len(observed_content)])
+                elif mode == "append" and content_bytes:
+                    tail.extend(chunk)
+                    if len(tail) > len(content_bytes):
+                        del tail[:-len(content_bytes)]
     except OSError as exc:
         return Verification(passed=False, summary="Could not independently read the written file.", evidence={"path": str(destination), "error": str(exc)})
-    digest = hashlib.sha256(payload).hexdigest()
-    content_bytes = content.encode("utf-8")
-    content_matches = payload == content_bytes if mode in {"create_new", "overwrite"} else payload.endswith(content_bytes)
+    digest_text = digest.hexdigest()
+    if mode in {"create_new", "overwrite"}:
+        content_matches = size_bytes == len(content_bytes) and bytes(observed_content) == content_bytes
+    else:
+        content_matches = not content_bytes or bytes(tail) == content_bytes
     output_matches = (
         result.output.get("path") == str(destination)
         and result.output.get("mode") == mode
         and result.output.get("bytes_written") == len(content_bytes)
-        and result.output.get("size_bytes") == len(payload)
-        and result.output.get("sha256") == digest
+        and result.output.get("size_bytes") == size_bytes
+        and result.output.get("sha256") == digest_text
     )
     passed = content_matches and output_matches
     return Verification(
         passed=passed,
         summary="Written file independently verified by disk read and SHA-256." if passed else "Written file content or digest differs from the requested result.",
-        evidence={"path": str(destination), "size_bytes": len(payload), "sha256": digest, "content_matches": content_matches, "tool_output_matches": output_matches},
+        evidence={"path": str(destination), "size_bytes": size_bytes, "sha256": digest_text, "content_matches": content_matches, "tool_output_matches": output_matches},
     )
 
 

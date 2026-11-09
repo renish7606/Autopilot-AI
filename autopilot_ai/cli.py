@@ -261,6 +261,13 @@ def format_report(report: dict) -> str:
             arguments = plan.get("arguments", {})
             lines.append(f"Target file: {arguments.get('path', '(not available)')}")
             lines.append(f"Write mode: {arguments.get('mode', 'create_new')}")
+            content = arguments.get("content", "")
+            if isinstance(content, str):
+                content_truncated = len(content) > 500
+                preview = content[:500].replace("\r", "\\r").replace("\n", "\\n")
+                lines.append(f"Content preview: {preview}")
+                if content_truncated:
+                    lines.append(f"Preview limited to 500 characters ({len(content)} total); use --debug to inspect the full plan.")
         lines.append("Next: review the planned change, then rerun the same task with --approve.")
     elif status == "clarification_required":
         lines.append(f"Question: {report.get('question', 'Please clarify the request.')}")
