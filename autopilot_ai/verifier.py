@@ -271,6 +271,31 @@ def verify_copied_file(result: ToolResult, source: Path, destination: Path) -> V
     return Verification(passed=passed, summary="Copied file content independently verified by SHA-256." if passed else "Copied file differs from source or tool output.", evidence={"source_size_bytes": source_size, "destination_size_bytes": dest_size, "source_sha256": source_hash, "destination_sha256": dest_hash, "tool_output_matches": output_matches})
 
 
+def verify_written_file(result: ToolResult, destination: Path, content: str, mode: str) -> Verification:
+    if result.status != "success" or not destination.is_file() or destination.is_symlink():
+        return Verification(passed=False, summary="Written file is missing or the tool failed.", evidence={"path": str(destination), "exists": destination.is_file()})
+    try:
+        payload = destination.read_bytes()
+    except OSError as exc:
+        return Verification(passed=False, summary="Could not independently read the written file.", evidence={"path": str(destination), "error": str(exc)})
+    digest = hashlib.sha256(payload).hexdigest()
+    content_bytes = content.encode("utf-8")
+    content_matches = payload == content_bytes if mode in {"create_new", "overwrite"} else payload.endswith(content_bytes)
+    output_matches = (
+        result.output.get("path") == str(destination)
+        and result.output.get("mode") == mode
+        and result.output.get("bytes_written") == len(content_bytes)
+        and result.output.get("size_bytes") == len(payload)
+        and result.output.get("sha256") == digest
+    )
+    passed = content_matches and output_matches
+    return Verification(
+        passed=passed,
+        summary="Written file independently verified by disk read and SHA-256." if passed else "Written file content or digest differs from the requested result.",
+        evidence={"path": str(destination), "size_bytes": len(payload), "sha256": digest, "content_matches": content_matches, "tool_output_matches": output_matches},
+    )
+
+
 def verify_webpage_open(result: ToolResult, requested_url: str) -> Verification:
     if result.status != "success":
         return Verification(passed=False, summary="Browser navigation did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})

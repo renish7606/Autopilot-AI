@@ -20,7 +20,7 @@ from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
 from autopilot_ai.session_state import SessionState
 from autopilot_ai.tools import APP_ALIASES, ToolRegistry, _resolve_app_executable
-from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_inspection, verify_directory_listing, verify_file_contents, verify_webpage_open
+from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_inspection, verify_directory_listing, verify_file_contents, verify_webpage_open, verify_written_file
 
 
 def test_run_command_safe_execution_is_verified(tmp_path: Path) -> None:
@@ -228,6 +228,79 @@ def test_read_file_contents_is_retryable_after_transient_read_error() -> None:
     assert should_retry(
         "read_file_contents", ToolResult(status="error", error_code="filesystem_error"), Verification(passed=False, summary="failed"), attempt=1
     ) is True
+
+
+def test_write_file_requires_approval_then_writes_and_verifies(tmp_path: Path) -> None:
+    preview = run_goal("Write file notes.txt with content Hello", tmp_path, planner="heuristic")
+    assert preview["status"] == "approval_required"
+    assert preview["plan"]["tool_name"] == "write_file"
+    assert preview["plan"]["arguments"]["mode"] == "create_new"
+    assert not (tmp_path / "notes.txt").exists()
+
+    report = run_goal("Write file notes.txt with content Hello", tmp_path, planner="heuristic", approved=True)
+
+    assert report["status"] == "completed"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "Hello"
+    assert report["verification"]["passed"] is True
+    assert report["tool_result"]["output"]["bytes_written"] == 5
+
+
+def test_write_file_overwrite_and_append_are_atomically_verified(tmp_path: Path) -> None:
+    from hashlib import sha256
+
+    target = tmp_path / "notes.txt"
+    target.write_text("before", encoding="utf-8")
+    registry = ToolRegistry(PathPolicy(tmp_path))
+
+    overwritten = registry.execute("write_file", {"path": "notes.txt", "content": "replacement", "mode": "overwrite"})
+    assert overwritten.status == "success"
+    assert overwritten.output["sha256"] == sha256(b"replacement").hexdigest()
+    assert verify_written_file(overwritten, target, "replacement", "overwrite").passed is True
+
+    appended = registry.execute("write_file", {"path": "notes.txt", "content": " + more", "mode": "append"})
+    assert appended.status == "success"
+    assert target.read_text(encoding="utf-8") == "replacement + more"
+    assert appended.output["sha256"] == sha256(b"replacement + more").hexdigest()
+    assert verify_written_file(appended, target, " + more", "append").passed is True
+
+
+def test_write_file_rejects_overwrite_create_and_path_escape(tmp_path: Path) -> None:
+    (tmp_path / "existing.txt").write_text("keep", encoding="utf-8")
+    registry = ToolRegistry(PathPolicy(tmp_path))
+
+    existing = registry.execute("write_file", {"path": "existing.txt", "content": "bad"})
+    escape = registry.execute("write_file", {"path": "../outside.txt", "content": "bad"})
+    missing_append = registry.execute("write_file", {"path": "missing.txt", "content": "bad", "mode": "append"})
+
+    assert existing.status == "denied"
+    assert escape.status == "denied"
+    assert missing_append.status == "denied"
+    assert (tmp_path / "existing.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_write_file_schema_is_strict_and_extra_forbidden(tmp_path: Path) -> None:
+    registry = ToolRegistry(PathPolicy(tmp_path))
+
+    extra = registry.execute("write_file", {"path": "new.txt", "content": "x", "unexpected": True})
+    bad_root = registry.execute("write_file", {"path": "new.txt", "content": "x", "root_index": "0"})
+
+    assert extra.status == "denied" and extra.error_code == "invalid_arguments"
+    assert bad_root.status == "denied" and bad_root.error_code == "invalid_arguments"
+
+
+def test_write_file_is_never_retried() -> None:
+    assert should_retry(
+        "write_file", ToolResult(status="error", error_code="filesystem_error"), Verification(passed=False, summary="failed"), attempt=1
+    ) is False
+
+
+def test_write_file_planner_requires_approval_and_preserves_content() -> None:
+    step = plan_goal_steps("Write file notes.txt with content First line")[0]
+
+    assert step.tool_name == "write_file"
+    assert step.arguments == {"path": "notes.txt", "content": "First line", "mode": "create_new", "root_index": 0}
+    assert step.risk_level == "medium"
+    assert step.requires_approval is True
 
 
 def test_run_command_schema_forbids_extra_or_coerced_arguments(tmp_path: Path) -> None:

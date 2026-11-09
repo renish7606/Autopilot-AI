@@ -11,7 +11,7 @@ from .planner import ClarificationRequired, ModelPlannerError, PlanningError, pl
 from .policy import PathPolicy, PolicyError, command_risk
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
-from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_desktop_inspection
+from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_desktop_inspection, verify_written_file
 
 
 class AmbiguousSearchScope(ValueError):
@@ -278,8 +278,31 @@ def run_goal(
                 return {"status": "error", "goal": goal, "message": f"Approved-application policy could not be read: {exc}"}
             if app_is_trusted:
                 step = step.model_copy(update={"requires_approval": False})
+        elif step.tool_name == "write_file":
+            step = step.model_copy(update={"risk_level": "medium", "requires_approval": True})
         try:
-            if step.tool_name == "create_directory":
+            if step.tool_name == "write_file":
+                mode = step.arguments["mode"]
+                if mode == "create_new":
+                    target = policy.resolve_path(step.arguments["path"], step.arguments["root_index"])
+                    if target.exists():
+                        return {
+                            "status": "clarification_required",
+                            "goal": goal,
+                            "question": f"{target.name} already exists. Specify whether to append to it or overwrite it, and include the new content.",
+                        }
+                    if not target.parent.is_dir():
+                        return {"status": "denied", "goal": goal, "message": "The destination parent must already exist inside an approved directory."}
+                else:
+                    target = policy.resolve_path(step.arguments["path"], step.arguments["root_index"])
+                    if not target.parent.is_dir():
+                        return {"status": "denied", "goal": goal, "message": "The destination parent must already exist inside an approved directory."}
+                    if mode == "append" and (not target.is_file() or target.is_symlink()):
+                        return {"status": "denied", "goal": goal, "message": "Append requires an existing regular file."}
+                    if mode == "overwrite" and target.exists() and (not target.is_file() or target.is_symlink()):
+                        return {"status": "denied", "goal": goal, "message": "Overwrite requires a regular file destination."}
+                source = None
+            elif step.tool_name == "create_directory":
                 target = policy.resolve_new_path(step.arguments["path"])
                 source = None
             elif step.tool_name == "open_webpage":
@@ -327,7 +350,9 @@ def run_goal(
         attempt_history = []
         for attempt in range(1, MAX_ATTEMPTS + 1):
             result = registry.execute(step.tool_name, step.arguments)
-            if step.tool_name == "create_directory":
+            if step.tool_name == "write_file":
+                verification = verify_written_file(result, target, step.arguments["content"], step.arguments["mode"])
+            elif step.tool_name == "create_directory":
                 verification = verify_created_directory(result, target)
             elif step.tool_name == "copy_file":
                 verification = verify_copied_file(result, source, target)

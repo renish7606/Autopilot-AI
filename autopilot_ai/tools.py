@@ -63,6 +63,15 @@ class CopyFileArgs(BaseModel):
     source_root_index: int = Field(default=0, ge=0)
 
 
+class WriteFileArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=300)
+    content: str = Field(max_length=100000)
+    mode: Literal["create_new", "overwrite", "append"] = "create_new"
+    root_index: int = Field(default=0, ge=0)
+
+
 class InspectActiveWindowArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -169,6 +178,68 @@ def _copy_file(policy: PathPolicy, source_path: str, destination_path: str, sour
                 # trouble without misreporting the copy operation itself.
                 cleanup_warning = f"Temporary staging file could not be removed: {exc}"
     output = {"source": str(source), "destination": str(destination), "size_bytes": size, "sha256": digest.hexdigest()}
+    if cleanup_warning:
+        output["warning"] = cleanup_warning
+    return output
+
+
+def _write_file(policy: PathPolicy, path: str, content: str, mode: str, root_index: int) -> dict[str, Any]:
+    destination = policy.resolve_path(path, root_index)
+    if not destination.parent.is_dir():
+        raise ToolError("The destination parent must already exist inside an approved directory.")
+    exists = destination.exists()
+    if mode == "create_new" and exists:
+        raise ToolError("The destination already exists; create_new does not overwrite files.")
+    if mode == "append" and (not exists or not destination.is_file()):
+        raise ToolError("Append requires an existing regular file.")
+    if mode == "overwrite" and exists and not destination.is_file():
+        raise ToolError("Overwrite requires a regular file destination.")
+
+    content_bytes = content.encode("utf-8")
+    try:
+        initial_content = destination.read_bytes() if mode == "append" else b""
+        final_content = initial_content + content_bytes
+        temporary = destination.with_name(f".{destination.name}.tmp.{uuid4().hex}")
+        temporary_created = False
+        published = False
+        cleanup_warning = None
+        try:
+            with temporary.open("xb") as stream:
+                temporary_created = True
+                stream.write(final_content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if mode == "create_new":
+                try:
+                    os.link(temporary, destination)
+                except FileExistsError as exc:
+                    raise ToolError("The destination already exists; create_new does not overwrite files.") from exc
+                published = True
+            else:
+                os.replace(temporary, destination)
+                temporary_created = False
+                published = True
+        finally:
+            if temporary_created:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError as exc:
+                    if published:
+                        cleanup_warning = f"Temporary staging file could not be removed: {exc}"
+                    else:
+                        raise ToolExecutionError(f"Could not remove temporary staging file: {exc}") from exc
+    except ToolError:
+        raise
+    except OSError as exc:
+        raise ToolExecutionError(f"Could not write file: {exc}") from exc
+
+    output = {
+        "path": str(destination),
+        "mode": mode,
+        "bytes_written": len(content_bytes),
+        "size_bytes": len(final_content),
+        "sha256": hashlib.sha256(final_content).hexdigest(),
+    }
     if cleanup_warning:
         output["warning"] = cleanup_warning
     return output
@@ -437,6 +508,7 @@ class ToolRegistry:
             "search_files": (SearchFilesArgs, _search_files),
             "create_directory": (CreateDirectoryArgs, _create_directory),
             "copy_file": (CopyFileArgs, _copy_file),
+            "write_file": (WriteFileArgs, _write_file),
             "open_webpage": (OpenWebpageArgs, lambda policy, url: open_webpage(url)),
             "inspect_active_window": (InspectActiveWindowArgs, lambda policy, max_controls, screenshot_fallback: inspect_active_window(max_controls, screenshot_fallback)),
             "run_command": (RunCommandArgs, _run_command),

@@ -180,6 +180,13 @@ def format_report(report: dict) -> str:
             elif plan.get("tool_name") == "copy_file":
                 lines.append(f"  Copied to: {output.get('destination', '(not available)')}")
                 lines.append(f"  Size: {output.get('size_bytes', 'unknown')} bytes")
+            elif plan.get("tool_name") == "write_file":
+                lines.append(f"  File: {output.get('path', '(not available)')}")
+                lines.append(f"  Mode: {output.get('mode', plan.get('arguments', {}).get('mode', 'unknown'))}")
+                if output.get("bytes_written") is not None:
+                    lines.append(f"  Bytes written: {output['bytes_written']}")
+                if output.get("sha256"):
+                    lines.append(f"  SHA-256: {output['sha256']}")
             elif plan.get("tool_name") == "run_command":
                 lines.append(f"  Exit code: {output.get('exit_code', 'unknown')}")
                 if output.get("stdout"):
@@ -249,6 +256,11 @@ def format_report(report: dict) -> str:
         lines.append("Note: the local model plan was unavailable or did not match the request, so AutoPilot used its validated deterministic interpretation.")
     status = report.get("status")
     if status == "approval_required":
+        plan = report.get("plan", {})
+        if plan.get("tool_name") == "write_file":
+            arguments = plan.get("arguments", {})
+            lines.append(f"Target file: {arguments.get('path', '(not available)')}")
+            lines.append(f"Write mode: {arguments.get('mode', 'create_new')}")
         lines.append("Next: review the planned change, then rerun the same task with --approve.")
     elif status == "clarification_required":
         lines.append(f"Question: {report.get('question', 'Please clarify the request.')}")
