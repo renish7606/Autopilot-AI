@@ -15,6 +15,7 @@ from autopilot_ai.cli import format_report, render_report
 from autopilot_ai.conversation import ConversationSession
 from autopilot_ai.contracts import PlanStep, TaskPlan, ToolResult, Verification
 from autopilot_ai.desktop import DesktopToolError, _capture_screenshot, _inspect_uia, inspect_active_window
+from autopilot_ai.memory import TaskMemory
 from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_goal_steps, plan_with_ollama, plan_with_ollama_steps
 from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
@@ -180,6 +181,27 @@ def test_read_file_contents_runs_and_is_independently_verified(tmp_path: Path) -
     assert report["status"] == "completed"
     assert report["plan"]["tool_name"] == "read_file_contents"
     assert report["tool_result"]["output"]["content"] == "# Notes\nImportant content"
+    assert report["verification"]["passed"] is True
+
+
+@pytest.mark.parametrize("goal", ["Open analysis.pdf", "Open file analysis.pdf", 'Please open the file "analysis.pdf"'])
+def test_open_supported_document_is_planned_as_file_read(goal: str) -> None:
+    plan = plan_goal_steps(goal)[0]
+
+    assert plan.tool_name == "read_file_contents"
+    assert plan.arguments["path"] == "analysis.pdf"
+    assert plan.requires_approval is False
+
+
+def test_open_file_name_reads_approved_text_file(tmp_path: Path) -> None:
+    target = tmp_path / "notes.md"
+    target.write_text("Document text", encoding="utf-8")
+
+    report = run_goal("Open file notes.md", tmp_path, planner="heuristic")
+
+    assert report["status"] == "completed"
+    assert report["plan"]["tool_name"] == "read_file_contents"
+    assert report["tool_result"]["output"]["content"] == "Document text"
     assert report["verification"]["passed"] is True
 
 
@@ -464,6 +486,48 @@ def test_conversation_discards_stale_candidates_when_new_task_arrives() -> None:
     new_report = {"status": "unsupported", "goal": "open settings"}
     assert session.handle("open settings", lambda goal: new_report)["status"] == "unsupported"
     assert session.handle("the second one", lambda _: {"status": "unsupported"})["status"] == "unsupported"
+
+
+def test_task_memory_persists_steps_resumes_sessions_and_searches(tmp_path: Path) -> None:
+    memory = TaskMemory(tmp_path / "memory.db")
+    session_id = memory.create_session()
+    memory.record_step(session_id, "Find report.pdf", "search_files", "success", "Found one report", {"matches": ["report.pdf"]})
+
+    resumed = ConversationSession(memory, session_id)
+    report = resumed.handle("Read report.pdf", lambda goal: {"status": "unsupported", "goal": goal, "message": "No read requested."})
+
+    history = memory.get_recent_history(session_id)
+    results = memory.search_memory("report")
+    assert report["session_id"] == session_id
+    assert f"Session ID: {session_id}" in format_report(report)
+    assert [entry["tool_name"] for entry in history] == ["search_files", "conversation"]
+    assert history[0]["output"] == {"matches": ["report.pdf"]}
+    assert len(results) == 2
+
+
+def test_task_memory_rejects_unknown_resume_session(tmp_path: Path) -> None:
+    memory = TaskMemory(tmp_path / "memory.db")
+
+    with pytest.raises(ValueError, match="Unknown session ID"):
+        ConversationSession(memory, "missing-session")
+
+
+def test_task_memory_cli_history_lists_persisted_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from autopilot_ai import cli
+
+    memory_path = tmp_path / "memory.db"
+    session_id = TaskMemory(memory_path).create_session()
+    TaskMemory(memory_path).record_step(session_id, "Run command echo test", "run_command", "success", "Command completed", {"exit_code": 0})
+    monkeypatch.setattr(cli, "TaskMemory", lambda: TaskMemory(memory_path))
+    monkeypatch.setattr("sys.argv", ["autopilot_ai.cli", "--history", session_id])
+
+    cli.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["history"][0]["session_id"] == session_id
+    assert output["history"][0]["tool_name"] == "run_command"
 
 
 def test_directory_verifier_checks_types_sizes_path_and_count(tmp_path: Path) -> None:

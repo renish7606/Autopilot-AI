@@ -1,6 +1,6 @@
 # AutoPilot AI
 
-AutoPilot AI is a local-first autonomous computer-use agent, developed in verified phases. The current CLI can plan and execute bounded filesystem tasks, read approved file contents, selected terminal commands, read-only browser tasks, launch installed Windows applications, and inspect the active Windows window; desktop actions, calendar integration, task memory, and a dashboard remain future phases.
+AutoPilot AI is a local-first autonomous computer-use agent, developed in verified phases. The current CLI can plan and execute bounded filesystem tasks, read approved file contents, selected terminal commands, read-only browser tasks, launch installed Windows applications, inspect the active Windows window, and persist task history across sessions; desktop actions, calendar integration, and a dashboard remain future phases.
 
 ## Current phase
 
@@ -58,7 +58,7 @@ To search filenames recursively:
 python -m autopilot_ai.cli "Find files containing budget"
 ```
 
-To read an existing file, use a relative path under the selected workspace or an approved directory. A bare filename is looked up across approved roots, including nested folders, when it identifies one unique file. If multiple files share the name, specify a relative path. Absolute paths work only when they remain inside an approved root. Text and supported code/data files are decoded as UTF-8 with replacement for invalid bytes; PDFs are read with `pypdf`. A PDF page can be supplied through a direct tool call; natural-language requests read the whole PDF. Output is limited to 8,000 characters by default.
+To read an existing file, use a relative path under the selected workspace or an approved directory. A bare filename is looked up across approved roots, including nested folders, when it identifies one unique file. If multiple files share the name, specify a relative path. Absolute paths work only when they remain inside an approved root. Text and supported code/data files are decoded as UTF-8 with replacement for invalid bytes; PDFs are read with `pypdf`. A PDF page can be supplied through a direct tool call; natural-language requests read the whole PDF. `Open analysis.pdf` and `Open file notes.md` mean read the supported file's contents; they do not start a GUI document viewer. Output is limited to 8,000 characters by default.
 
 ```powershell
 python -m autopilot_ai.cli "Read file README.md" --planner heuristic --workspace D:\Agent
@@ -77,7 +77,14 @@ You can scope a filename or extension search to a named folder inside an approve
 
 Extension search matches filename suffixes only; it does not inspect file contents. Image search currently includes PNG, JPG/JPEG, GIF, BMP, WEBP, TIF/TIFF, SVG, and HEIC files. Results stay within the configured approved roots.
 
-Search results in normal CLI output are numbered and show both each filename and its full path. Start `python -m autopilot_ai.cli --interactive --planner heuristic` for a temporary prompt session. If multiple approved folders match a folder-scoped request, reply with a number or ordinal such as `the second one`; AutoPilot reruns the read-only search in that folder. After a search with multiple file matches, the same kind of reply identifies a path but does not open or change the file. If a number is outside the available choices, AutoPilot repeats the choice list. Session state is held in memory and is cleared when the process exits. One-shot CLI commands remain available as before.
+Search results in normal CLI output are numbered and show both each filename and its full path. Start `python -m autopilot_ai.cli --interactive --planner heuristic` for a persistent prompt session. Its session ID is printed at startup; use `--resume SESSION_ID` with `--interactive` to continue recording in that session. Each one-shot command also starts or can resume a session and prints its ID in normal output. Task history is stored locally in `data/autopilot_memory.db`; `--history` lists recent actions across sessions, while `--history SESSION_ID` lists one session. `TaskMemory.search_memory(query)` is available to search saved goals, tool names, statuses, and summaries. If multiple approved folders match a folder-scoped request, reply with a number or ordinal such as `the second one`; AutoPilot reruns the read-only search in that folder. After a search with multiple file matches, the same kind of reply identifies a path but does not open or change the file. Numbered-choice context remains temporary and is cleared when the process exits.
+
+```powershell
+python -m autopilot_ai.cli --interactive --planner heuristic
+python -m autopilot_ai.cli --interactive --planner heuristic --resume 7e6b...your-session-id
+python -m autopilot_ai.cli --history
+python -m autopilot_ai.cli --history 7e6b...your-session-id
+```
 
 Add `--debug` to interactive mode to print the complete JSON report, including plans, tool results, verification evidence, and candidate paths.
 

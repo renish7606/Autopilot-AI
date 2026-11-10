@@ -3,18 +3,53 @@
 from collections.abc import Callable
 from typing import Any
 
+from .memory import TaskMemory
 from .session_state import SessionState
 
 
 class ConversationSession:
     """Keep one turn of search context so users can refer to a numbered result."""
 
-    def __init__(self) -> None:
+    def __init__(self, memory: TaskMemory | None = None, session_id: str | None = None) -> None:
+        self.memory = memory or TaskMemory()
+        if session_id is None:
+            self.session_id = self.memory.create_session()
+        elif self.memory.has_session(session_id):
+            self.session_id = session_id
+        else:
+            raise ValueError(f"Unknown session ID: {session_id}")
         self.state = SessionState()
         self._pending_kind: str | None = None
         self._pending_goal: str | None = None
 
     def handle(self, message: str, run_task: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+        """Resolve a candidate reply, or process it as a new task."""
+        report = self._handle(message, run_task)
+        report["session_id"] = self.session_id
+        self._record_turn(message, report)
+        return report
+
+    def _record_turn(self, message: str, report: dict[str, Any]) -> None:
+        goal = str(report.get("goal", message))
+        steps = report.get("steps")
+        entries = steps if isinstance(steps, list) else ([report] if report.get("plan") else [])
+        if not entries:
+            self.memory.record_step(
+                self.session_id, goal, "conversation", str(report.get("status", "unknown")),
+                str(report.get("question", report.get("message", report.get("status", "Turn recorded.")))), report,
+            )
+            return
+        for entry in entries:
+            plan = entry.get("plan", {})
+            result = entry.get("tool_result", {})
+            verification = entry.get("verification", {})
+            summary = verification.get("summary") or report.get("message") or result.get("error_code") or result.get("status") or report.get("status", "Turn recorded.")
+            self.memory.record_step(
+                self.session_id, goal, str(plan.get("tool_name", "conversation")),
+                str(result.get("status", report.get("status", "unknown"))), str(summary), entry,
+            )
+
+    def _handle(self, message: str, run_task: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
         """Resolve a candidate reply, or process it as a new task."""
         was_pending = self.state.pending_question is not None
         selected = self.state.select_candidate(message)

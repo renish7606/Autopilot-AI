@@ -209,7 +209,22 @@ python -m autopilot_ai.cli "Find files" --planner heuristic
 python -m autopilot_ai.cli "Delete all files" --planner heuristic
 
 
-11. OUTPUT STATUS GUIDE
+11. PERSISTENT TASK MEMORY
+--------------------------
+
+# Start a session; copy the printed session ID to resume it in a later process:
+python -m autopilot_ai.cli --interactive --planner heuristic
+python -m autopilot_ai.cli --interactive --planner heuristic --resume SESSION_ID
+
+# Review recent steps from all sessions or from one selected session:
+python -m autopilot_ai.cli --history
+python -m autopilot_ai.cli --history SESSION_ID
+
+# The local database is data/autopilot_memory.db. Numbered search choices are
+# temporary; task history and structured step results persist.
+
+
+12. OUTPUT STATUS GUIDE
 -----------------------
 
 Completed             Operation ran and independent verification passed.

@@ -13,6 +13,7 @@ from .approved_dirs import (
 )
 from .agent import run_goal
 from .conversation import ConversationSession
+from .memory import TaskMemory
 
 
 def main() -> None:
@@ -34,7 +35,9 @@ def main() -> None:
     parser.add_argument("--approve", action="store_true", help="Explicitly approve the planned filesystem change (create/copy).")
     parser.add_argument("--debug", action="store_true", help="Print the full structured JSON report, including plans and verification evidence.")
     parser.add_argument("--delay-seconds", type=int, choices=range(0, 31), default=0, help="Wait up to 30 seconds before desktop inspection so you can switch to the app to inspect.")
-    parser.add_argument("--interactive", action="store_true", help="Start a temporary conversation; numbered search results can be selected in the next turn.")
+    parser.add_argument("--interactive", action="store_true", help="Start a persistent conversation; numbered search results can be selected in the next turn.")
+    parser.add_argument("--history", nargs="?", const="", metavar="SESSION_ID", help="Show recent task history, optionally for one session.")
+    parser.add_argument("--resume", metavar="SESSION_ID", help="Continue an existing session (use with --interactive or a task goal).")
     args = parser.parse_args()
 
     managing = bool(args.approve_dir or args.unapprove_dir or args.list_approved_dirs or args.clear_approved_dirs)
@@ -46,6 +49,8 @@ def main() -> None:
         parser.error("Use --interactive without a task goal; enter tasks at the prompt.")
     if args.interactive and args.approve:
         parser.error("Interactive mode cannot pre-approve filesystem changes; approve changes with a one-shot command.")
+    if args.history is not None and (args.goal or args.interactive or args.resume):
+        parser.error("Use --history by itself, optionally followed by a session ID.")
 
     try:
         if args.approve_dir:
@@ -64,14 +69,24 @@ def main() -> None:
             roots = load_approved_dirs()
             print(json.dumps({"status": "ok", "approved_dirs": [str(path) for path in roots]}, indent=2))
             return
+        if args.history is not None:
+            memory = TaskMemory()
+            entries = memory.get_recent_history(args.history) if args.history else memory.get_recent_sessions_history()
+            print(json.dumps({"status": "ok", "history": entries}, indent=2, ensure_ascii=False))
+            return
         if args.interactive:
             _run_interactive(args)
             return
         if not args.goal:
             parser.error("Provide a natural-language task or filename, or use an approved-directory management option.")
         approved_dirs = [*load_approved_dirs(), *args.approved_dir]
-        report = run_goal(args.goal, args.workspace, planner=args.planner, approved_dirs=approved_dirs, approved=args.approve, desktop_delay_seconds=args.delay_seconds)
-    except ApprovedDirectoryError as exc:
+        memory = TaskMemory()
+        conversation = ConversationSession(memory, args.resume) if args.resume else ConversationSession(memory)
+        report = conversation.handle(
+            args.goal,
+            lambda goal: run_goal(goal, args.workspace, planner=args.planner, approved_dirs=approved_dirs, approved=args.approve, desktop_delay_seconds=args.delay_seconds),
+        )
+    except (ApprovedDirectoryError, ValueError) as exc:
         print(json.dumps({"status": "error", "message": str(exc)}, indent=2))
         raise SystemExit(1) from exc
     print(render_report(report, debug=args.debug))
@@ -80,10 +95,12 @@ def main() -> None:
 
 
 def _run_interactive(args: argparse.Namespace) -> None:
-    """Run a transient prompt loop; all task execution still goes through run_goal."""
-    session = ConversationSession()
+    """Run a persistent prompt loop; each task still goes through run_goal."""
+    memory = TaskMemory()
+    session = ConversationSession(memory, args.resume) if args.resume else ConversationSession(memory)
     approved_dirs = [*load_approved_dirs(), *args.approved_dir]
-    print("AutoPilot conversation started. Type 'exit' or 'quit' to end; context is cleared when this process exits.")
+    print(f"AutoPilot conversation started. Session ID: {session.session_id}")
+    print("Type 'exit' or 'quit' to end. Task history persists across runs; numbered search choices remain temporary.")
     while True:
         try:
             message = input("You> ").strip()
@@ -131,6 +148,8 @@ def format_report(report: dict) -> str:
         "error": "Failed",
     }
     lines = [f"Task: {report.get('goal', 'AutoPilot task')}", f"Status: {labels.get(report.get('status'), 'Failed')}"]
+    if report.get("session_id"):
+        lines.append(f"Session ID: {report['session_id']}")
     if report.get("selected_folder"):
         lines.append(f"Selected folder: {report['selected_folder']}")
     steps = report.get("steps")

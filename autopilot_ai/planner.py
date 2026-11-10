@@ -3,6 +3,7 @@
 import json
 import os
 import re
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -46,6 +47,12 @@ _FILE_TYPE_EXTENSIONS = {
     "pictures": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic"],
     "photos": [".jpg", ".jpeg", ".png", ".heic", ".webp"],
 }
+
+_READABLE_FILE_SUFFIXES = frozenset({
+    ".pdf", ".txt", ".log", ".md", ".markdown", ".rst", ".json", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".py", ".pyi", ".js", ".ts", ".tsx", ".jsx", ".html", ".htm", ".css", ".xml", ".sql", ".sh",
+    ".ps1", ".bat", ".cmd", ".c", ".h", ".cpp", ".hpp", ".cs", ".java", ".go", ".rs", ".rb", ".php",
+})
 
 
 def _requested_extensions(goal: str) -> list[str] | None:
@@ -141,6 +148,23 @@ def plan_goal(goal: str) -> PlanStep:
     if browser_match:
         url = browser_match.group(1).rstrip(".,;!?)]\"'")
         return PlanStep(step_id="step-1", description="Open a public web page and read its visible text.", tool_name="open_webpage", arguments={"url": url}, expected_result="A fresh browser page load returns an HTTP response and visible page content.", risk_level="low", requires_approval=False)
+    open_file_match = re.fullmatch(
+        r"(?:please\s+)?open\s+(?:the\s+)?(?:file\s+)?(?P<path>.+)",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    )
+    if open_file_match:
+        path = open_file_match.group("path").strip().strip("\"'")
+        if Path(path).suffix.casefold() in _READABLE_FILE_SUFFIXES:
+            return PlanStep(
+                step_id="step-1",
+                description="Read the contents of an approved file.",
+                tool_name="read_file_contents",
+                arguments={"path": path, "root_index": 0, "max_characters": 8000},
+                expected_result="A fresh disk read matches the returned content and file digest.",
+                risk_level="low",
+                requires_approval=False,
+            )
     launch_match = re.fullmatch(
         r"(?:please\s+)?(?:open|launch|start)\s+(?:app(?:lication)?|program\s+)?([a-zA-Z0-9_.\- ]+)",
         goal.strip(),
