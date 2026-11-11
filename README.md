@@ -1,6 +1,6 @@
 # AutoPilot AI
 
-AutoPilot AI is a local-first autonomous computer-use agent, developed in verified phases. The current CLI can plan and execute bounded filesystem tasks, read approved file contents, selected terminal commands, read-only browser tasks, launch installed Windows applications, inspect the active Windows window, and persist task history across sessions; desktop actions, calendar integration, and a dashboard remain future phases.
+AutoPilot AI is a local-first autonomous computer-use agent, developed in verified phases. The current CLI can plan and execute bounded filesystem tasks, read approved file contents, selected terminal commands, read-only browser tasks, launch installed Windows applications, inspect and perform approved actions in the active Windows window, and persist task history across sessions; calendar integration and a dashboard remain future phases.
 
 ## Current phase
 
@@ -27,7 +27,7 @@ python -m autopilot_ai.cli "Show me the files in this folder"
 
 Playwright uses a fresh, headless Chromium context for each page. Browser binaries are kept under `D:\Agent\down\playwright-browsers`; the application sets this location by default. It only opens public HTTP/HTTPS pages, blocks localhost/private-network destinations, downloads, and requests other than GET/HEAD, and returns visible page text (up to 4,000 characters). It does not submit forms or reuse your personal browser profile. Sites can refuse automated requests or require sign-in; those responses are reported as failures, and AutoPilot cannot use a session from your regular browser.
 
-Desktop inspection uses pywinauto with the Windows UI Automation (`uia`) backend. If UIA fails, the fallback captures only the visible region of the foreground window on the primary display with PyAutoGUI. Screenshots are saved under `D:\Agent\down\screenshots`; they may still contain sensitive information shown inside that application. Verification checks the image dimensions and that the same window remains active. This phase does not click or type.
+Desktop inspection uses pywinauto with the Windows UI Automation (`uia`) backend. If UIA fails, the fallback captures only the visible region of the foreground window on the primary display with PyAutoGUI. Screenshots are saved under `D:\Agent\down\screenshots`; they may still contain sensitive information shown inside that application. Verification checks the image dimensions and that the same window remains active. Separate mouse and keyboard actions require `--approve`, are limited to one explicit action per request, and verify screen bounds, cursor position, or foreground-window identity.
 
 By default, the approved workspace is `workspace/`. Set `--workspace` to select a different primary root. For filename search and file reading, approve directories once and then use filenames from those roots. The local allowlist is stored in `data/approved_directories.json` on D: and can be inspected or cleared. `--approved-dir` remains available for a one-time root. Listing is limited to the primary root; filename search checks every approved root.
 
@@ -151,6 +151,18 @@ python -m autopilot_ai.cli "Overwrite file notes.txt with content Replacement te
 
 Writes are staged beside the destination and atomically published. A successful write is verified from disk using the resulting file's SHA-256 digest. Write operations are never automatically retried.
 
+Desktop mouse and keyboard actions are available as one explicitly described action per command. Click coordinates must be inside the primary display, keys are validated against a bounded key set, PyAutoGUI's failsafe remains enabled, and every action requires `--approve`. Review the action and its inputs in the approval plan before rerunning with approval. Interactive mode cannot pre-approve these actions.
+
+```powershell
+python -m autopilot_ai.cli "Click at (500, 300)" --planner heuristic
+python -m autopilot_ai.cli "Click at (500, 300)" --planner heuristic --approve
+python -m autopilot_ai.cli 'Type text "Hello from AutoPilot"' --planner heuristic --approve
+python -m autopilot_ai.cli "Press Ctrl+S" --planner heuristic --approve
+python -m autopilot_ai.cli "Press Enter" --planner heuristic --approve
+```
+
+Typing and key presses go to whichever window is active when the approved command runs. Verification rechecks the primary screen, cursor position for mouse actions, and the foreground window. Desktop actions are never retried automatically.
+
 The `python` commands assume the `.venv` created above is activated. Otherwise prefix each command with the virtual environment's Python executable so it uses the environment where Playwright was installed. `--approve-dir` adds folders to filename search and file reading; write operations still require `--approve`.
 
 For a one-time exact filename search across Downloads and another folder, you can pass a natural-language request or a bare filename. Results include the full path for every match:
@@ -221,4 +233,4 @@ The current work is auditing and hardening the existing search, file operations,
 
 ## Safety boundary
 
-Registered tools are allowlisted and validate arguments with Pydantic. Search checks filename matches only, skips symlinks, reports inaccessible locations or limits as incomplete, and returns full paths. File reading accepts existing regular files under the selected workspace or approved directories, resolves a unique bare filename across those roots, rejects ambiguity, traversal, and symlinks, and independently rechecks the returned content slice, file size, and SHA-256 digest. Create-directory, copy, and write operations require `--approve`; writes are confined to approved roots, stage beside the destination, and atomically publish without automatic retries. Terminal commands run only in an approved directory; destructive commands are denied and all non-inspection commands require `--approve`. Browser access is read-only and rejects local/private destinations. Each application name requires one explicit `--approve` before it is persisted as trusted; launches use PATH, Windows App Paths, and limited standard-install discovery, then are verified by PID or executable name. Desktop access only reads accessibility information or captures a screenshot; it does not click or type. This phase does not implement deletion, calendar changes, desktop actions, task memory, or unrestricted command execution.
+Registered tools are allowlisted and validate arguments with Pydantic. Search checks filename matches only, skips symlinks, reports inaccessible locations or limits as incomplete, and returns full paths. File reading accepts existing regular files under the selected workspace or approved directories, resolves a unique bare filename across those roots, rejects ambiguity, traversal, and symlinks, and independently rechecks the returned content slice, file size, and SHA-256 digest. Create-directory, copy, and write operations require `--approve`; writes are confined to approved roots, stage beside the destination, and atomically publish without automatic retries. Terminal commands run only in an approved directory; destructive commands are denied and all non-inspection commands require `--approve`. Browser access is read-only and rejects local/private destinations. Each application name requires one explicit `--approve` before it is persisted as trusted; launches use PATH, Windows App Paths, and limited standard-install discovery, then are verified by PID or executable name. Desktop inspection only reads accessibility information or captures a screenshot; desktop actions are separately allowlisted, require approval, and are checked against screen and foreground-window state. This phase does not implement deletion, calendar changes, or unrestricted command execution.

@@ -192,10 +192,25 @@ python -m autopilot_ai.cli "Inspect active window" --planner heuristic --delay-s
 
 # UI Automation reads visible controls. If that fails, a screenshot of the
 # foreground window's visible region is saved under D:\Agent\down\screenshots.
-# This feature does not click, type, or launch applications.
+# Inspection itself is read-only; see the next section for approved actions.
 
 
-10. MULTI-STEP TASK, CLARIFICATION, AND UNSUPPORTED REQUESTS
+10. DESKTOP MOUSE AND KEYBOARD ACTIONS
+--------------------------------------
+
+# Preview the exact action, coordinates/text/keys, then repeat with approval.
+# Keep the target app in the foreground before approving a key or text action.
+python -m autopilot_ai.cli "Click at (500, 300)" --planner heuristic
+python -m autopilot_ai.cli "Click at (500, 300)" --planner heuristic --approve
+python -m autopilot_ai.cli 'Type text "Hello from AutoPilot"' --planner heuristic --approve
+python -m autopilot_ai.cli "Press Ctrl+S" --planner heuristic --approve
+python -m autopilot_ai.cli "Press Enter" --planner heuristic --approve
+
+# Desktop actions are never automatically retried and cannot be pre-approved
+# from interactive mode. Coordinates are checked against the primary display.
+
+
+11. MULTI-STEP TASK, CLARIFICATION, AND UNSUPPORTED REQUESTS
 -----------------------------------------------------------
 
 # Run two supported read-only steps. --debug shows evidence for each step:
@@ -209,7 +224,7 @@ python -m autopilot_ai.cli "Find files" --planner heuristic
 python -m autopilot_ai.cli "Delete all files" --planner heuristic
 
 
-11. PERSISTENT TASK MEMORY
+12. PERSISTENT TASK MEMORY
 --------------------------
 
 # Start a session; copy the printed session ID to resume it in a later process:
@@ -224,7 +239,7 @@ python -m autopilot_ai.cli --history SESSION_ID
 # temporary; task history and structured step results persist.
 
 
-12. OUTPUT STATUS GUIDE
+13. OUTPUT STATUS GUIDE
 -----------------------
 
 Completed             Operation ran and independent verification passed.
@@ -238,10 +253,10 @@ Unsupported           This type of request is not implemented.
 Use --debug on task commands to see structured JSON, attempts, and verification evidence.
 
 
-12. NOT IMPLEMENTED YET
+14. NOT IMPLEMENTED YET
 -----------------------
 
 There are no commands yet for unrestricted terminal/shell execution, deleting
-or moving files, clicking or typing in desktop apps, calendar operations,
-task-memory management, or a React dashboard. Unsupported requests should be
-reported as Unsupported or Denied; do not expect them to execute.
+or moving files, calendar operations, or a React dashboard. Unsupported
+requests should be reported as Unsupported or Denied; do not expect them to
+execute.

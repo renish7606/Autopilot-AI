@@ -20,8 +20,8 @@ from autopilot_ai.planner import ModelPlannerError, PlanningError, plan_goal_ste
 from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
 from autopilot_ai.session_state import SessionState
-from autopilot_ai.tools import APP_ALIASES, ToolRegistry, _resolve_app_executable
-from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_inspection, verify_directory_listing, verify_file_contents, verify_webpage_open, verify_written_file
+from autopilot_ai.tools import APP_ALIASES, ToolArgumentsError, ToolRegistry, _resolve_app_executable
+from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_action, verify_desktop_inspection, verify_directory_listing, verify_file_contents, verify_webpage_open, verify_written_file
 
 
 def test_run_command_safe_execution_is_verified(tmp_path: Path) -> None:
@@ -182,6 +182,89 @@ def test_read_file_contents_runs_and_is_independently_verified(tmp_path: Path) -
     assert report["plan"]["tool_name"] == "read_file_contents"
     assert report["tool_result"]["output"]["content"] == "# Notes\nImportant content"
     assert report["verification"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("goal", "expected"),
+    [
+        ("Click at (100, 200)", {"action_type": "click", "x": 100, "y": 200, "text": None, "keys": []}),
+        ("Double-click at 40, 50", {"action_type": "double_click", "x": 40, "y": 50, "text": None, "keys": []}),
+        ('Type text "hello"', {"action_type": "type_text", "x": None, "y": None, "text": "hello", "keys": []}),
+        ("Press Enter", {"action_type": "press_key", "x": None, "y": None, "text": None, "keys": ["enter"]}),
+        ("Press Ctrl+S", {"action_type": "hotkey", "x": None, "y": None, "text": None, "keys": ["ctrl", "s"]}),
+    ],
+)
+def test_desktop_action_intents_are_explicit_and_approval_gated(goal: str, expected: dict) -> None:
+    report = run_goal(goal, Path.cwd(), planner="heuristic")
+
+    assert report["status"] == "approval_required"
+    assert report["plan"]["tool_name"] == "desktop_action"
+    assert report["plan"]["arguments"] == expected
+    assert report["plan"]["requires_approval"] is True
+    assert report["plan"]["risk_level"] == "medium"
+
+
+def test_desktop_action_schema_rejects_extras_and_conflicting_fields(tmp_path: Path) -> None:
+    registry = ToolRegistry(PathPolicy(tmp_path))
+
+    with pytest.raises(ToolArgumentsError):
+        registry.validate_arguments("desktop_action", {"action_type": "click", "x": 5, "y": 5, "shell": "bad"})
+    with pytest.raises(ToolArgumentsError):
+        registry.validate_arguments("desktop_action", {"action_type": "hotkey", "keys": ["ctrl"]})
+
+
+def test_desktop_action_executes_with_bounds_and_fresh_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    cursor = [20, 30]
+    calls: list[tuple[str, object]] = []
+    pyautogui = SimpleNamespace(
+        FAILSAFE=False,
+        PAUSE=0,
+        size=lambda: SimpleNamespace(width=800, height=600),
+        position=lambda: SimpleNamespace(x=cursor[0], y=cursor[1]),
+        click=lambda x, y: (calls.append(("click", (x, y))), cursor.__setitem__(slice(None), [x, y])),
+        doubleClick=lambda **kwargs: calls.append(("double", kwargs)),
+        rightClick=lambda **kwargs: calls.append(("right", kwargs)),
+        write=lambda value, **kwargs: calls.append(("write", value)),
+        press=lambda key: calls.append(("press", key)),
+        hotkey=lambda *keys: calls.append(("hotkey", keys)),
+    )
+    win32gui = SimpleNamespace(GetForegroundWindow=lambda: 123)
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "win32gui", win32gui)
+
+    report = run_goal("Click at 100, 200", tmp_path, planner="heuristic", approved=True)
+
+    assert report["status"] == "completed"
+    assert calls == [("click", (100, 200))]
+    assert pyautogui.FAILSAFE is True
+    assert pyautogui.PAUSE == 0.25
+    assert report["verification"]["passed"] is True
+    assert report["verification"]["evidence"]["cursor_matches_requested_position"] is True
+
+
+def test_desktop_action_rejects_edge_coordinates_and_is_never_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    pyautogui = SimpleNamespace(
+        FAILSAFE=False, PAUSE=0,
+        size=lambda: SimpleNamespace(width=800, height=600),
+        position=lambda: SimpleNamespace(x=10, y=10),
+    )
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "win32gui", SimpleNamespace(GetForegroundWindow=lambda: 123))
+    result = ToolRegistry(PathPolicy(tmp_path)).execute(
+        "desktop_action", {"action_type": "click", "x": 0, "y": 20}
+    )
+
+    assert result.status == "denied"
+    assert result.error_code == "desktop_policy_denied"
+    assert should_retry("desktop_action", result, Verification(passed=False, summary="denied"), 1) is False
 
 
 @pytest.mark.parametrize("goal", ["Open analysis.pdf", "Open file analysis.pdf", 'Please open the file "analysis.pdf"'])

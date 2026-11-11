@@ -11,6 +11,87 @@ class DesktopToolError(RuntimeError):
     pass
 
 
+class DesktopActionPolicyError(DesktopToolError):
+    """A desktop action failed a local geometry or state policy check."""
+
+
+def _desktop_state(pyautogui) -> dict:
+    """Read current primary-screen geometry, cursor, and foreground window."""
+    try:
+        import win32gui
+    except ImportError as exc:
+        raise DesktopToolError("pywin32 is required to verify the active Windows window.") from exc
+    try:
+        size = pyautogui.size()
+        position = pyautogui.position()
+        width, height = int(size.width), int(size.height)
+        x, y = int(position.x), int(position.y)
+        handle = int(win32gui.GetForegroundWindow())
+        if width <= 0 or height <= 0 or not handle:
+            raise DesktopToolError("Windows did not report valid screen dimensions and a foreground window.")
+        return {"screen_width": width, "screen_height": height, "cursor_x": x, "cursor_y": y, "foreground_window": handle}
+    except DesktopToolError:
+        raise
+    except Exception as exc:
+        raise DesktopToolError(f"Could not inspect the active desktop state: {exc}") from exc
+
+
+def inspect_desktop_state() -> dict:
+    """Fresh desktop observation used by the independent action verifier."""
+    try:
+        import pyautogui
+    except ImportError as exc:
+        raise DesktopToolError("PyAutoGUI is required for desktop actions.") from exc
+    return _desktop_state(pyautogui)
+
+
+def desktop_action(action_type: str, x: int | None, y: int | None, text: str | None, keys: list[str]) -> dict:
+    """Perform one approved, screen-bounded mouse or keyboard action."""
+    try:
+        import pyautogui
+    except ImportError as exc:
+        raise DesktopToolError("PyAutoGUI is required for desktop actions.") from exc
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0.25
+    before = _desktop_state(pyautogui)
+    if action_type in {"click", "double_click", "right_click"}:
+        if x is None or y is None:
+            raise DesktopActionPolicyError("Pointer actions require screen coordinates.")
+        if not (0 < x < before["screen_width"] - 1 and 0 < y < before["screen_height"] - 1):
+            raise DesktopActionPolicyError(
+                f"Coordinates must be strictly inside the primary screen bounds (1..{before['screen_width'] - 2}, 1..{before['screen_height'] - 2})."
+            )
+    try:
+        if action_type == "click":
+            pyautogui.click(x=x, y=y)
+        elif action_type == "double_click":
+            pyautogui.doubleClick(x=x, y=y)
+        elif action_type == "right_click":
+            pyautogui.rightClick(x=x, y=y)
+        elif action_type == "type_text":
+            pyautogui.write(text, interval=0.01)
+        elif action_type == "press_key":
+            pyautogui.press(keys[0])
+        elif action_type == "hotkey":
+            pyautogui.hotkey(*keys)
+        else:
+            raise DesktopToolError("Unsupported desktop action.")
+        after = _desktop_state(pyautogui)
+    except DesktopToolError:
+        raise
+    except Exception as exc:
+        raise DesktopToolError(f"Desktop action failed: {exc}") from exc
+    return {
+        "action_type": action_type,
+        "x": x,
+        "y": y,
+        "text_length": len(text) if text is not None else None,
+        "keys": keys,
+        "before": before,
+        "after": after,
+    }
+
+
 def _inspect_uia(max_controls: int) -> dict:
     try:
         import win32gui

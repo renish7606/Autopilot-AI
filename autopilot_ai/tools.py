@@ -9,11 +9,11 @@ import subprocess
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .browser import BrowserPolicyError, BrowserToolError, OpenWebpageArgs, open_webpage
 from .contracts import ToolResult
-from .desktop import DesktopToolError, inspect_active_window
+from .desktop import DesktopActionPolicyError, DesktopToolError, desktop_action, inspect_active_window
 from .filename_matching import matches_filename
 from .policy import PathPolicy, command_risk
 
@@ -77,6 +77,54 @@ class InspectActiveWindowArgs(BaseModel):
 
     max_controls: int = Field(default=60, ge=1, le=100)
     screenshot_fallback: bool = True
+
+
+_DESKTOP_KEYS = frozenset(
+    {"enter", "esc", "tab", "space", "backspace", "delete", "insert", "home", "end", "pageup", "pagedown",
+     "up", "down", "left", "right", "ctrl", "alt", "shift", "win", "command", "capslock", "numlock",
+     "scrolllock", "printscreen", "pause", "clear", "help", "apps", "decimal", "add", "subtract", "multiply", "divide",
+     *{f"f{index}" for index in range(1, 13)}, *{str(index) for index in range(10)},
+     *{chr(code) for code in range(ord("a"), ord("z") + 1)},
+     "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "`"}
+)
+
+
+class DesktopActionArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action_type: Literal["click", "double_click", "right_click", "type_text", "press_key", "hotkey"]
+    x: int | None = Field(default=None, ge=0)
+    y: int | None = Field(default=None, ge=0)
+    text: str | None = Field(default=None, max_length=500)
+    keys: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("keys")
+    @classmethod
+    def validate_keys(cls, values: list[str]) -> list[str]:
+        normalized = [key.strip().casefold() for key in values]
+        if any(key not in _DESKTOP_KEYS for key in normalized):
+            raise ValueError("One or more keys are not supported.")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("A key may appear only once in a hotkey.")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> "DesktopActionArgs":
+        if self.action_type in {"click", "double_click", "right_click"}:
+            if self.x is None or self.y is None or self.text is not None or self.keys:
+                raise ValueError("Pointer actions require x and y and cannot include text or keys.")
+        elif self.action_type == "type_text":
+            if not self.text or self.x is not None or self.y is not None or self.keys:
+                raise ValueError("type_text requires non-empty text and cannot include coordinates or keys.")
+        elif self.action_type == "press_key":
+            if len(self.keys) != 1 or self.x is not None or self.y is not None or self.text is not None:
+                raise ValueError("press_key requires exactly one key and cannot include coordinates or text.")
+        elif self.action_type == "hotkey":
+            if not 2 <= len(self.keys) <= 5 or self.x is not None or self.y is not None or self.text is not None:
+                raise ValueError("hotkey requires two to five keys and cannot include coordinates or text.")
+            if not any(key in {"ctrl", "alt", "shift", "win", "command"} for key in self.keys):
+                raise ValueError("hotkey must include a modifier key.")
+        return self
 
 
 class RunCommandArgs(BaseModel):
@@ -393,6 +441,18 @@ def _read_file_contents(
     }
 
 
+def _desktop_action_tool(
+    policy: PathPolicy,
+    action_type: str,
+    x: int | None,
+    y: int | None,
+    text: str | None,
+    keys: list[str],
+) -> dict[str, Any]:
+    del policy  # Desktop actions are bounded against the primary display, not filesystem roots.
+    return desktop_action(action_type, x, y, text, keys)
+
+
 class ToolError(ValueError):
     pass
 
@@ -519,6 +579,7 @@ class ToolRegistry:
             "write_file": (WriteFileArgs, _write_file),
             "open_webpage": (OpenWebpageArgs, lambda policy, url: open_webpage(url)),
             "inspect_active_window": (InspectActiveWindowArgs, lambda policy, max_controls, screenshot_fallback: inspect_active_window(max_controls, screenshot_fallback)),
+            "desktop_action": (DesktopActionArgs, _desktop_action_tool),
             "run_command": (RunCommandArgs, _run_command),
             "launch_app": (LaunchAppArgs, _launch_app),
             "read_file_contents": (ReadFileContentsArgs, _read_file_contents),
@@ -554,6 +615,8 @@ class ToolRegistry:
             return ToolResult(status="denied", error_code="browser_policy_denied", output={"detail": str(exc)})
         except BrowserToolError as exc:
             return ToolResult(status="error", error_code="browser_error", output={"detail": str(exc)})
+        except DesktopActionPolicyError as exc:
+            return ToolResult(status="denied", error_code="desktop_policy_denied", output={"detail": str(exc)})
         except DesktopToolError as exc:
             return ToolResult(status="error", error_code="desktop_error", output={"detail": str(exc)})
         except ToolExecutionError as exc:

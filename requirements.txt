@@ -3,4 +3,5 @@ pytest>=8.0,<9.0
 playwright>=1.48,<2.0
 pywinauto>=0.6.8,<1.0
 pyautogui>=0.9.54,<1.0
+pywin32>=306; platform_system == "Windows"
 pypdf>=5.0,<6.0

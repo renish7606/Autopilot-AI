@@ -10,7 +10,7 @@ import time
 
 from .contracts import ToolResult, Verification
 from .browser import open_webpage
-from .desktop import DesktopToolError, inspect_active_window
+from .desktop import DesktopToolError, inspect_active_window, inspect_desktop_state
 from .filename_matching import matches_filename
 
 
@@ -369,6 +369,67 @@ def verify_webpage_open(result: ToolResult, requested_url: str) -> Verification:
             "title_matches": same_title,
             "status_matches": same_status,
             "visible_text_present": visible_text_present,
+        },
+    )
+
+
+def verify_desktop_action(
+    result: ToolResult,
+    action_type: str,
+    x: int | None = None,
+    y: int | None = None,
+) -> Verification:
+    """Recheck screen geometry, cursor position, and the foreground window."""
+    if result.status != "success":
+        return Verification(passed=False, summary="Desktop action did not execute successfully.", evidence={"status": result.status, "error_code": result.error_code})
+    output = result.output
+    before, after = output.get("before"), output.get("after")
+    if output.get("action_type") != action_type or not isinstance(before, dict) or not isinstance(after, dict):
+        return Verification(passed=False, summary="Desktop action returned malformed state evidence.", evidence=output)
+    try:
+        fresh = inspect_desktop_state()
+    except DesktopToolError as exc:
+        return Verification(passed=False, summary="A fresh desktop-state check could not verify the action.", evidence={"error": str(exc)})
+    dimensions_match = (
+        fresh.get("screen_width") == before.get("screen_width") == after.get("screen_width")
+        and fresh.get("screen_height") == before.get("screen_height") == after.get("screen_height")
+    )
+    active_window_valid = (
+        isinstance(before.get("foreground_window"), int)
+        and before.get("foreground_window") != 0
+        and isinstance(after.get("foreground_window"), int)
+        and after.get("foreground_window") != 0
+        and fresh.get("foreground_window") != 0
+    )
+    pointer_action = action_type in {"click", "double_click", "right_click"}
+    active_window_unchanged = active_window_valid and (
+        pointer_action or before.get("foreground_window") == after.get("foreground_window") == fresh.get("foreground_window")
+    )
+    cursor_in_bounds = (
+        isinstance(fresh.get("cursor_x"), int)
+        and isinstance(fresh.get("cursor_y"), int)
+        and 0 <= fresh["cursor_x"] < fresh.get("screen_width", 0)
+        and 0 <= fresh["cursor_y"] < fresh.get("screen_height", 0)
+    )
+    cursor_matches = True
+    if pointer_action:
+        cursor_matches = (
+            isinstance(x, int) and not isinstance(x, bool)
+            and isinstance(y, int) and not isinstance(y, bool)
+            and fresh.get("cursor_x") == x and fresh.get("cursor_y") == y
+            and 0 < x < fresh.get("screen_width", 0) - 1
+            and 0 < y < fresh.get("screen_height", 0) - 1
+        )
+    passed = dimensions_match and active_window_unchanged and cursor_in_bounds and cursor_matches
+    return Verification(
+        passed=passed,
+        summary="Desktop action postconditions independently verified." if passed else "The cursor, screen bounds, or foreground window did not match the desktop action postconditions.",
+        evidence={
+            "fresh_state": fresh,
+            "dimensions_match": dimensions_match,
+            "active_window_unchanged_or_valid_for_pointer": active_window_unchanged,
+            "cursor_in_bounds": cursor_in_bounds,
+            "cursor_matches_requested_position": cursor_matches,
         },
     )
 

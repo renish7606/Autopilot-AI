@@ -216,6 +216,16 @@ def format_report(report: dict) -> str:
                 lines.append(f"  Application: {output.get('app_name', '(not available)')}")
                 lines.append(f"  Process ID: {output.get('pid', 'unknown')}")
                 lines.append(f"  Executable: {output.get('executable_path', '(not available)')}")
+            elif plan.get("tool_name") == "desktop_action":
+                arguments = plan.get("arguments", {})
+                action_type = output.get("action_type", arguments.get("action_type", "unknown"))
+                lines.append(f"  Action: {action_type}")
+                if action_type in {"click", "double_click", "right_click"}:
+                    lines.append(f"  Screen position: ({arguments.get('x', 'unknown')}, {arguments.get('y', 'unknown')})")
+                elif action_type == "type_text":
+                    lines.append(f"  Text: {arguments.get('text', '')[:200]}")
+                else:
+                    lines.append(f"  Keys: {' + '.join(arguments.get('keys', []))}")
             elif plan.get("tool_name") == "read_file_contents":
                 lines.append(f"  File: {output.get('path', '(not available)')}")
                 if output.get("page_number") is not None:

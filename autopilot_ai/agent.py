@@ -11,7 +11,7 @@ from .planner import ClarificationRequired, ModelPlannerError, PlanningError, pl
 from .policy import PathPolicy, PolicyError, command_risk
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
-from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_desktop_inspection, verify_written_file
+from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_desktop_action, verify_desktop_inspection, verify_written_file
 
 
 class AmbiguousSearchScope(ValueError):
@@ -280,6 +280,8 @@ def run_goal(
                 step = step.model_copy(update={"requires_approval": False})
         elif step.tool_name == "write_file":
             step = step.model_copy(update={"risk_level": "medium", "requires_approval": True})
+        elif step.tool_name == "desktop_action":
+            step = step.model_copy(update={"risk_level": "medium", "requires_approval": True})
         try:
             if step.tool_name == "write_file":
                 mode = step.arguments["mode"]
@@ -360,6 +362,8 @@ def run_goal(
                 verification = verify_webpage_open(result, step.arguments["url"])
             elif step.tool_name == "inspect_active_window":
                 verification = verify_desktop_inspection(result)
+            elif step.tool_name == "desktop_action":
+                verification = verify_desktop_action(result, step.arguments["action_type"], step.arguments["x"], step.arguments["y"])
             elif step.tool_name == "list_directory":
                 verification = verify_directory_listing(result, target)
             elif step.tool_name == "search_files":
