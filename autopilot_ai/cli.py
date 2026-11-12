@@ -164,6 +164,40 @@ def format_report(report: dict) -> str:
         lines.append(f"Session ID: {report['session_id']}")
     if report.get("selected_folder"):
         lines.append(f"Selected folder: {report['selected_folder']}")
+    if report.get("workflow") == "react_file_filter_copy":
+        if report.get("summary") and report.get("status") != "clarification_required":
+            lines.append(str(report["summary"]))
+        if report.get("status") == "clarification_required":
+            lines.append(f"Question: {report.get('summary', 'Please clarify the request.')}")
+        observations = report.get("observations", [])
+        if observations:
+            lines.append("Actions and checks:")
+            for index, observation in enumerate(observations, start=1):
+                action = observation.get("action", "Action")
+                path = observation.get("path") or observation.get("destination") or ""
+                result = observation.get("tool_result", {})
+                verification = observation.get("verification", {})
+                detail = f" {path}" if path else ""
+                if "passed" in verification:
+                    checked = "verified" if verification["passed"] else "verification failed"
+                    lines.append(f"  {index}. {action}{detail} — {checked}")
+                elif "verified" in observation:
+                    lines.append(f"  {index}. {action}{detail} — {'verified' if observation['verified'] else 'verification failed'}")
+                elif result:
+                    lines.append(f"  {index}. {action}{detail} — {result.get('status', 'unknown')}")
+        planned = report.get("planned_actions", [])
+        if planned:
+            lines.append("Awaiting approval for:")
+            for action in planned:
+                if action["action"] == "create_directory":
+                    lines.append(f"  - Create folder: {action['path']}")
+                else:
+                    lines.append(f"  - Copy: {action['source']} -> {action['destination']}")
+        if report.get("status") == "approval_required":
+            lines.append("Next: rerun the same request with --approve to apply these changes.")
+        elif report.get("status") in {"failed", "partially_completed", "denied"}:
+            lines.append(f"Details: {report.get('summary') or report.get('message', 'The workflow stopped.')}")
+        return "\n".join(lines)
     steps = report.get("steps")
     reports = steps if isinstance(steps, list) else ([report] if report.get("plan") else [])
     if reports:

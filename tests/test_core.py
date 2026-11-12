@@ -865,6 +865,84 @@ def test_copy_file_requires_approval_and_verifies_digest(tmp_path: Path) -> None
     assert (tmp_path / "copy.txt").read_bytes() == source.read_bytes()
 
 
+def test_react_file_filter_copy_stops_for_approval_then_searches_reads_and_verifies_copy(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    downloads = tmp_path / "Downloads"
+    workspace.mkdir()
+    downloads.mkdir()
+    (downloads / "invoice.txt").write_text("Please pay this invoice.", encoding="utf-8")
+    (downloads / "notes.txt").write_text("Meeting notes only.", encoding="utf-8")
+    request = "Find all text files in Downloads, check which ones mention 'invoice', and copy them to workspace/invoices"
+
+    preview = run_goal(request, workspace, approved_dirs=[downloads])
+
+    assert preview["status"] == "approval_required"
+    assert preview["workflow"] == "react_file_filter_copy"
+    assert len(preview["observations"]) == 3  # search and inspect each matching file type result
+    assert len(preview["planned_actions"]) == 2  # create destination and copy the matching file
+    preview_text = render_report(preview)
+    assert "Status: Approval required" in preview_text
+    assert "invoice.txt" in preview_text
+    assert "rerun the same request with --approve" in preview_text
+    assert not (workspace / "invoices").exists()
+
+    result = run_goal(request, workspace, approved_dirs=[downloads], approved=True)
+
+    assert result["status"] == "completed"
+    assert result["workflow"] == "react_file_filter_copy"
+    assert (workspace / "invoices" / "invoice.txt").read_text(encoding="utf-8") == "Please pay this invoice."
+    assert not (workspace / "invoices" / "notes.txt").exists()
+    assert all(item["verification"]["passed"] for item in result["observations"] if "verification" in item)
+
+
+def test_react_file_filter_copy_does_not_copy_when_search_is_incomplete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    downloads = tmp_path / "Downloads"
+    workspace.mkdir()
+    downloads.mkdir()
+    (downloads / "invoice.txt").write_text("invoice", encoding="utf-8")
+    original_execute = ToolRegistry.execute
+
+    def incomplete_search(self: ToolRegistry, tool_name: str, arguments: dict) -> ToolResult:
+        result = original_execute(self, tool_name, arguments)
+        if tool_name == "search_files":
+            return result.model_copy(update={"output": {**result.output, "complete": False}})
+        return result
+
+    monkeypatch.setattr(ToolRegistry, "execute", incomplete_search)
+    result = run_goal(
+        "Find text files in Downloads, check which ones mention invoice, and copy them to workspace/invoices",
+        workspace,
+        approved_dirs=[downloads],
+        approved=True,
+    )
+
+    assert result["status"] == "partially_completed"
+    assert "no files were copied" in result["summary"]
+    assert not (workspace / "invoices").exists()
+
+
+def test_react_file_filter_copy_denies_existing_target_without_claiming_partial_mutation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    downloads = tmp_path / "Downloads"
+    destination = workspace / "invoices"
+    workspace.mkdir()
+    downloads.mkdir()
+    destination.mkdir()
+    (downloads / "invoice.txt").write_text("invoice", encoding="utf-8")
+    (destination / "invoice.txt").write_text("keep existing", encoding="utf-8")
+
+    result = run_goal(
+        "Find text files in Downloads, check which ones mention invoice, and copy them to workspace/invoices",
+        workspace,
+        approved_dirs=[downloads],
+        approved=True,
+    )
+
+    assert result["status"] == "denied"
+    assert (destination / "invoice.txt").read_text(encoding="utf-8") == "keep existing"
+
+
 def test_copy_file_refuses_overwrite_and_path_escape(tmp_path: Path) -> None:
     (tmp_path / "source.txt").write_text("source", encoding="utf-8")
     (tmp_path / "existing.txt").write_text("keep", encoding="utf-8")

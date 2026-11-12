@@ -163,6 +163,19 @@ def run_goal(
     except (PolicyError, OSError, ValueError) as exc:
         return {"status": "denied", "goal": goal, "message": f"Approved directory rejected: {exc}"}
     registry = ToolRegistry(policy)
+    # Dispatch the supported evidence-driven workflow before single-turn
+    # planning can accidentally reduce it to only its first clause.
+    if desktop_delay_seconds:
+        from .react import parse_file_workflow, run_file_workflow
+
+        if parse_file_workflow(goal) is not None:
+            return {"status": "error", "goal": goal, "message": "--delay-seconds can only be used with desktop inspection."}
+    else:
+        from .react import run_file_workflow
+
+    workflow_report = run_file_workflow(goal, policy, registry, approved)
+    if workflow_report is not None:
+        return workflow_report
     planner_used = planner
     planner_note: str | None = None
     try:

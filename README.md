@@ -53,6 +53,17 @@ After approving directories, pass only the filename:
 python -m autopilot_ai.cli "AutoPilot_AI_Project_Blueprint.pdf"
 ```
 
+### Bounded file search, inspect, and copy loop
+
+The current iterative workflow can search approved `Downloads` or a named approved folder for PDFs or text files, inspect each result for a literal phrase, and copy matching files into a subfolder of the primary workspace. It stops if the search or a read is incomplete or cannot be verified. Copies and a newly created destination folder require an explicit `--approve` run:
+
+```powershell
+python -m autopilot_ai.cli "Find all PDFs in Downloads, check which ones mention 'invoice', and copy them to workspace/invoices" --planner heuristic
+python -m autopilot_ai.cli "Find all PDFs in Downloads, check which ones mention 'invoice', and copy them to workspace/invoices" --planner heuristic --approve
+```
+
+`Downloads` must already be an approved directory, and the search is limited to 100 files. Phrase matching is case-insensitive literal text matching; this workflow does not infer semantic similarity or inspect image-only/scanned PDF pages with OCR. It is a bounded file workflow, not yet a general-purpose dynamic tool-selection loop.
+
 To list entries:
 
 ```powershell
