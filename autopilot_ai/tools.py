@@ -16,6 +16,7 @@ from .contracts import ToolResult
 from .desktop import DesktopActionPolicyError, DesktopToolError, desktop_action, inspect_active_window
 from .filename_matching import matches_filename
 from .policy import PathPolicy, command_risk
+from .web_search import SearchWebArgs, WebSearchError, search_web
 
 
 class ListDirectoryArgs(BaseModel):
@@ -592,6 +593,7 @@ class ToolRegistry:
             "copy_file": (CopyFileArgs, _copy_file),
             "write_file": (WriteFileArgs, _write_file),
             "open_webpage": (OpenWebpageArgs, lambda policy, url: open_webpage(url)),
+            "search_web": (SearchWebArgs, lambda policy, query, max_results: search_web(query, max_results)),
             "inspect_active_window": (InspectActiveWindowArgs, lambda policy, max_controls, screenshot_fallback: inspect_active_window(max_controls, screenshot_fallback)),
             "desktop_action": (DesktopActionArgs, _desktop_action_tool),
             "run_command": (RunCommandArgs, _run_command),
@@ -629,6 +631,8 @@ class ToolRegistry:
             return ToolResult(status="denied", error_code="browser_policy_denied", output={"detail": str(exc)})
         except BrowserToolError as exc:
             return ToolResult(status="error", error_code="browser_error", output={"detail": str(exc)})
+        except WebSearchError as exc:
+            return ToolResult(status="error", error_code="web_search_error", output={"detail": str(exc)})
         except DesktopActionPolicyError as exc:
             return ToolResult(status="denied", error_code="desktop_policy_denied", output={"detail": str(exc)})
         except DesktopToolError as exc:

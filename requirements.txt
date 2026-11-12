@@ -5,3 +5,4 @@ pywinauto>=0.6.8,<1.0
 pyautogui>=0.9.54,<1.0
 pywin32>=306; platform_system == "Windows"
 pypdf>=5.0,<6.0
+ddgs>=9.16,<10.0

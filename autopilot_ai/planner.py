@@ -190,6 +190,29 @@ def plan_goal(goal: str) -> PlanStep:
         )
     if any(phrase in normalized for phrase in ("inspect active window", "inspect the active window", "inspect screen", "what is on screen", "what's on screen", "what is on my screen", "what's on my screen", "read active window")):
         return PlanStep(step_id="step-1", description="Inspect the active desktop window using Windows UI Automation.", tool_name="inspect_active_window", arguments={"max_controls": 60, "screenshot_fallback": True}, expected_result="A fresh UI Automation read or a saved screenshot confirms the active window state.", risk_level="low", requires_approval=False)
+    web_search_match = re.fullmatch(
+        r"(?:please\s+)?(?:search\s+(?:(?:the\s+)?(?:web|internet|google|duckduckgo))|google|duckduckgo)\s+for\s+(.+)",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    )
+    if web_search_match:
+        query = re.sub(
+            r"\s+(?:and|,)\s*(?:summari[sz]e|briefly\s+summari[sz]e)\s+(?:the\s+)?(?:top|first)\s+result.*$",
+            "",
+            web_search_match.group(1).strip(),
+            flags=re.IGNORECASE,
+        ).strip(" .,!?")
+        if not query:
+            raise ClarificationRequired("What should I search the web for?")
+        return PlanStep(
+            step_id="step-1",
+            description="Search the public web through DDGS metasearch.",
+            tool_name="search_web",
+            arguments={"query": query, "max_results": 5},
+            expected_result="The structured results contain the requested query, ranked titles, snippets, and valid public links.",
+            risk_level="low",
+            requires_approval=False,
+        )
     browser_match = re.fullmatch(
         r"(?:please\s+)?(?:open(?:\s+(?:(?:the\s+)?(?:webpage|website|site)))?|visit|browse(?:\s+to)?|go to)\s+(https?://\S+)",
         goal.strip(),
@@ -458,7 +481,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
     """Ask the local model for a short plan; validate it but never execute it here."""
     system = (
         "You are a constrained planner. Return a JSON object matching the schema with an ordered steps array of 1 to 3 steps. "
-        "Only use list_directory, search_files, read_file_contents, write_file, open_webpage, inspect_active_window, desktop_action, run_command, and launch_app. open_webpage reads visible text from a public HTTP or HTTPS page. "
+        "Only use list_directory, search_files, search_web, read_file_contents, write_file, open_webpage, inspect_active_window, desktop_action, run_command, and launch_app. search_web uses the DDGS metasearch package and returns ranked public titles, snippets, and links; open_webpage reads visible text from a public HTTP or HTTPS page. "
         "inspect_active_window only reads visible controls from the current Windows window, with an optional screenshot fallback. "
         "desktop_action performs exactly one explicit click, double_click, right_click, type_text, press_key, or hotkey request; it always requires medium risk and user approval. "
         "list_directory lists immediate entries in the primary approved workspace. "
@@ -483,6 +506,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
         "list_directory": ("List entries in the approved workspace.", "A fresh workspace scan matches the tool's returned entry names."),
         "search_files": ("Search filenames under the approved workspace.", "An independent filename scan matches the returned search results."),
         "open_webpage": ("Open a public web page and read its visible text.", "A fresh browser page load returns an HTTP response and visible page content."),
+        "search_web": ("Search the public web through DDGS metasearch.", "The structured results contain the requested query, ranked titles, snippets, and valid public links."),
         "inspect_active_window": ("Inspect the active desktop window using Windows UI Automation.", "A fresh UI Automation read or a saved screenshot confirms the active window state."),
         "desktop_action": ("Perform one approved desktop mouse or keyboard action.", "A fresh screen, cursor, and foreground-window check confirms the desktop action postconditions."),
         "run_command": ("Run a terminal command in the approved working directory.", "The command exits successfully and its process result is independently checked."),

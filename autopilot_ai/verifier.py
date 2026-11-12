@@ -1,6 +1,7 @@
 """Independent postcondition checks for filesystem, browser, and desktop tools."""
 
 from pathlib import Path
+import ipaddress
 import csv
 from io import StringIO
 import os
@@ -12,6 +13,7 @@ from .contracts import ToolResult, Verification
 from .browser import open_webpage
 from .desktop import DesktopToolError, inspect_active_window, inspect_desktop_state
 from .filename_matching import matches_filename
+from urllib.parse import urlsplit
 
 
 def verify_command_execution(result: ToolResult) -> Verification:
@@ -309,6 +311,52 @@ def verify_written_file(result: ToolResult, destination: Path, content: str, mod
         passed=passed,
         summary="Written file independently verified by disk read and SHA-256." if passed else "Written file content or digest differs from the requested result.",
         evidence={"path": str(destination), "size_bytes": size_bytes, "sha256": digest_text, "content_matches": content_matches, "tool_output_matches": output_matches},
+    )
+
+
+def verify_web_search(result: ToolResult, requested_query: str, max_results: int) -> Verification:
+    """Independently validate the returned search payload and public result URLs."""
+    if result.status != "success":
+        return Verification(passed=False, summary="Web search did not complete successfully.", evidence={"status": result.status, "error_code": result.error_code})
+    output = result.output
+    rows = output.get("results")
+    if (
+        output.get("query") != requested_query.strip()
+        or output.get("provider") != "DDGS metasearch"
+        or not isinstance(rows, list)
+        or len(rows) > max_results
+        or output.get("count") != len(rows)
+    ):
+        return Verification(passed=False, summary="Search results did not match the requested query or result limit.")
+    seen: set[str] = set()
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict) or row.get("rank") != index:
+            return Verification(passed=False, summary="Search result ranking or record structure is invalid.", evidence={"invalid_rank": index})
+        title, url, snippet = row.get("title"), row.get("url"), row.get("snippet")
+        if not all(isinstance(value, str) for value in (title, url, snippet)) or not title.strip():
+            return Verification(passed=False, summary="A search result is missing its title, URL, or snippet.", evidence={"invalid_rank": index})
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return Verification(passed=False, summary="A search result contains an invalid URL.", evidence={"invalid_rank": index, "url": url})
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            return Verification(passed=False, summary="A search result contains an invalid or unsafe URL.", evidence={"invalid_rank": index, "url": url})
+        host = parsed.hostname.rstrip(".").casefold()
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            return Verification(passed=False, summary="A search result contains a local or internal hostname.", evidence={"invalid_rank": index, "url": url})
+        try:
+            if not ipaddress.ip_address(host).is_global:
+                return Verification(passed=False, summary="A search result contains a non-public IP address.", evidence={"invalid_rank": index, "url": url})
+        except ValueError:
+            if "." not in host:
+                return Verification(passed=False, summary="A search result contains an invalid hostname.", evidence={"invalid_rank": index, "url": url})
+        if url.casefold() in seen:
+            return Verification(passed=False, summary="Search results contain a duplicate URL.", evidence={"url": url})
+        seen.add(url.casefold())
+    return Verification(
+        passed=True,
+        summary=f"DDGS returned {len(rows)} well-formed result(s); query, ranking, result count, and public-link format were checked.",
+        evidence={"query_matches": True, "result_count": len(rows), "max_results": max_results, "unique_urls": len(seen)},
     )
 
 

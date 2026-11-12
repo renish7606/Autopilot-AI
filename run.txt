@@ -180,6 +180,9 @@ python -m autopilot_ai.cli "Open https://example.com" --planner heuristic
 # Add --debug to see the complete page result and verification evidence:
 python -m autopilot_ai.cli "Open https://example.com" --planner heuristic --debug
 
+# Search the public web via DuckDuckGo; no API key is needed.
+python -m autopilot_ai.cli "Search Google for Python 3.12 release notes and summarize the top result" --planner heuristic
+
 # A site may return 401/403, require sign-in, or block automated browsing.
 # AutoPilot uses a fresh browser session and does not reuse your normal browser login.
 

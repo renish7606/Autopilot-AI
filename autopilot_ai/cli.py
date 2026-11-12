@@ -240,6 +240,17 @@ def format_report(report: dict) -> str:
                         lines.append(f"  Search warning: {error}")
                     if len(output.get("errors", [])) > 3:
                         lines.append(f"  ...and {len(output['errors']) - 3} more search warning(s). Use --debug for the full report.")
+            elif plan.get("tool_name") == "search_web":
+                results = output.get("results", [])
+                lines.append(f"  Provider: {output.get('provider', 'unknown')}")
+                lines.append(f"  Query: {output.get('query', plan.get('arguments', {}).get('query', ''))}")
+                lines.append(f"  Found {len(results)} result(s).")
+                for index, item in enumerate(results, start=1):
+                    lines.append(f"  {index}) {item.get('title', '(untitled)')}")
+                    lines.append(f"     {item.get('url', '')}")
+                    if item.get("snippet"):
+                        label = "Top-result snippet" if index == 1 else "Snippet"
+                        lines.append(f"     {label}: {item['snippet'][:350]}")
             elif plan.get("tool_name") == "create_directory":
                 lines.append(f"  Directory: {output.get('path', '(not available)')}")
             elif plan.get("tool_name") == "copy_file":

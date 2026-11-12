@@ -11,7 +11,7 @@ from .planner import ClarificationRequired, ModelPlannerError, PlanningError, pl
 from .policy import PathPolicy, PolicyError, command_risk
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
-from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_desktop_action, verify_desktop_inspection, verify_written_file
+from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_web_search, verify_desktop_action, verify_desktop_inspection, verify_written_file
 
 
 class AmbiguousSearchScope(ValueError):
@@ -323,6 +323,9 @@ def run_goal(
             elif step.tool_name == "open_webpage":
                 target = None
                 source = None
+            elif step.tool_name == "search_web":
+                target = None
+                source = None
             elif step.tool_name == "inspect_active_window":
                 target = None
                 source = None
@@ -373,6 +376,8 @@ def run_goal(
                 verification = verify_copied_file(result, source, target)
             elif step.tool_name == "open_webpage":
                 verification = verify_webpage_open(result, step.arguments["url"])
+            elif step.tool_name == "search_web":
+                verification = verify_web_search(result, step.arguments["query"], step.arguments["max_results"])
             elif step.tool_name == "inspect_active_window":
                 verification = verify_desktop_inspection(result)
             elif step.tool_name == "desktop_action":

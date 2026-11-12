@@ -1054,6 +1054,96 @@ def test_public_webpage_request_runs_and_is_freshly_verified(tmp_path: Path, mon
     assert report["verification"]["evidence"]["fresh_http_status"] == 200
 
 
+def test_search_web_tool_normalizes_limits_and_verifies_provider_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from autopilot_ai.verifier import verify_web_search
+
+    calls: list[tuple[str, int, str]] = []
+
+    class FakeDDGS:
+        def __init__(self, timeout: int) -> None:
+            assert timeout == 10
+
+        def text(self, query: str, max_results: int, backend: str) -> list[dict[str, str]]:
+            calls.append((query, max_results, backend))
+            return [
+                {"title": "Python 3.12 What's New", "href": "https://docs.python.org/3.12/whatsnew/3.12.html", "body": "Release notes and highlights."},
+                {"title": "Unsafe local link", "href": "http://127.0.0.1/admin", "body": "Must be discarded."},
+                {"title": "Duplicate", "href": "https://docs.python.org/3.12/whatsnew/3.12.html", "body": "Duplicate URL."},
+            ]
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FakeDDGS))
+    result = ToolRegistry(PathPolicy(tmp_path)).execute("search_web", {"query": "  Python 3.12 release notes  ", "max_results": 5})
+
+    assert result.status == "success"
+    assert calls == [("Python 3.12 release notes", 5, "auto")]
+    assert result.output["provider"] == "DDGS metasearch"
+    assert result.output["count"] == 1
+    assert result.output["results"][0]["rank"] == 1
+    verification = verify_web_search(result, "Python 3.12 release notes", 5)
+    assert verification.passed is True
+
+
+def test_search_web_rejects_invalid_args_and_reports_provider_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from autopilot_ai.web_search import WebSearchError
+
+    registry = ToolRegistry(PathPolicy(tmp_path))
+    invalid = registry.execute("search_web", {"query": " ", "max_results": 11})
+    assert invalid.status == "denied"
+    assert invalid.error_code == "invalid_arguments"
+
+    class FailedDDGS:
+        def __init__(self, timeout: int) -> None:
+            pass
+
+        def text(self, query: str, max_results: int, backend: str) -> list[dict[str, str]]:
+            raise TimeoutError("provider timed out")
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FailedDDGS))
+    failed = registry.execute("search_web", {"query": "Python releases"})
+    assert failed.status == "error"
+    assert failed.error_code == "web_search_error"
+    assert "provider timed out" in failed.output["detail"]
+
+
+def test_search_web_treats_ddgs_no_results_exception_as_verified_empty_search(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from ddgs.exceptions import DDGSException
+    from autopilot_ai.verifier import verify_web_search
+
+    class EmptyDDGS:
+        def __init__(self, timeout: int) -> None:
+            pass
+
+        def text(self, query: str, max_results: int, backend: str) -> list[dict[str, str]]:
+            raise DDGSException("No results found.")
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=EmptyDDGS))
+    result = ToolRegistry(PathPolicy(tmp_path)).execute("search_web", {"query": "a query with no hits"})
+
+    assert result.status == "success"
+    assert result.output["results"] == []
+    assert result.output["count"] == 0
+    assert verify_web_search(result, "a query with no hits", 5).passed is True
+
+
+def test_heuristic_search_google_phrase_selects_duckduckgo_and_preserves_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from autopilot_ai import tools
+
+    page = {"query": "Python 3.12 release notes", "provider": "DDGS metasearch", "count": 1,
+            "results": [{"rank": 1, "title": "Python 3.12 What's New", "url": "https://docs.python.org/3.12/whatsnew/3.12.html", "snippet": "Release notes and highlights."}]}
+    monkeypatch.setattr(tools, "search_web", lambda query, max_results=5: page)
+
+    report = run_goal("Search Google for Python 3.12 release notes and summarize the top result", tmp_path, planner="heuristic")
+
+    assert report["status"] == "completed"
+    assert report["plan"]["tool_name"] == "search_web"
+    assert report["plan"]["arguments"]["query"] == "Python 3.12 release notes"
+    assert report["verification"]["passed"] is True
+    output = render_report(report)
+    assert "Provider: DDGS metasearch" in output
+    assert "Python 3.12 What's New" in output
+    assert "Top-result snippet: Release notes and highlights." in output
+
+
 @pytest.mark.parametrize(
     ("reported_url", "fresh_status"),
     [("https://other.example/", 200), ("https://example.com/", 503)],
