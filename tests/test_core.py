@@ -121,6 +121,22 @@ def test_launch_app_approval_persists_per_normalized_name(tmp_path: Path) -> Non
     assert is_app_approved("Chrome", config) is False
 
 
+def test_cli_can_approve_and_list_apps(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from autopilot_ai import cli
+
+    approved: set[str] = set()
+    monkeypatch.setattr(cli, "approve_app", lambda app: approved.add(app.casefold()))
+    monkeypatch.setattr(cli, "load_approved_apps", lambda: approved)
+    monkeypatch.setattr("sys.argv", ["autopilot", "--approve-app", "Notepad", "--approve-app", "Calculator"])
+
+    cli.main()
+    assert json.loads(capsys.readouterr().out) == {"status": "updated", "approved_apps": ["calculator", "notepad"]}
+
+    monkeypatch.setattr("sys.argv", ["autopilot", "--list-approved-apps"])
+    cli.main()
+    assert json.loads(capsys.readouterr().out) == {"status": "ok", "approved_apps": ["calculator", "notepad"]}
+
+
 def test_trusted_app_launch_does_not_require_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("autopilot_ai.agent.is_app_approved", lambda name: name == "Notepad")
     monkeypatch.setattr(
@@ -468,7 +484,7 @@ def test_session_state_keeps_context_for_invalid_reply_and_can_clear() -> None:
 
 
 def test_conversation_retains_multiple_search_results_for_ordinal_reply() -> None:
-    session = ConversationSession()
+    session = ConversationSession(memory=TaskMemory(":memory:"))
     report = {
         "status": "completed",
         "goal": "Find report.pdf",
@@ -485,7 +501,7 @@ def test_conversation_retains_multiple_search_results_for_ordinal_reply() -> Non
 
 
 def test_conversation_reasks_after_out_of_range_ordinal_then_accepts_choice() -> None:
-    session = ConversationSession()
+    session = ConversationSession(memory=TaskMemory(":memory:"))
     report = {
         "status": "completed",
         "plan": {"tool_name": "search_files"},
@@ -558,7 +574,7 @@ def test_interactive_cli_loops_through_invalid_and_valid_candidate_replies(
 
 
 def test_conversation_discards_stale_candidates_when_new_task_arrives() -> None:
-    session = ConversationSession()
+    session = ConversationSession(memory=TaskMemory(":memory:"))
     multi_match_report = {
         "status": "completed",
         "plan": {"tool_name": "search_files"},
@@ -593,6 +609,15 @@ def test_task_memory_rejects_unknown_resume_session(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unknown session ID"):
         ConversationSession(memory, "missing-session")
+
+
+def test_in_memory_task_memory_persists_across_operations() -> None:
+    memory = TaskMemory(":memory:")
+    session_id = memory.create_session()
+    memory.record_step(session_id, "Find a file", "search_files", "success", "Found it", {"count": 1})
+
+    assert memory.has_session(session_id)
+    assert memory.get_recent_history(session_id)[0]["summary"] == "Found it"
 
 
 def test_task_memory_cli_history_lists_persisted_actions(
@@ -871,6 +896,48 @@ def test_copy_file_preserves_destination_created_after_precheck(tmp_path: Path, 
     assert result.status == "denied"
     assert destination.read_text(encoding="utf-8") == "concurrent content"
     assert list(tmp_path.glob(".*.autopilot-tmp")) == []
+
+
+def test_atomic_new_file_publisher_uses_windows_rename_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from autopilot_ai import tools
+
+    temporary = tmp_path / "stage.tmp"
+    destination = tmp_path / "final.txt"
+    temporary.write_text("contents", encoding="utf-8")
+    rename_calls: list[tuple[Path, Path]] = []
+
+    def denied_hard_link(source: Path, target: Path) -> None:
+        raise PermissionError("hard links are unavailable")
+
+    def windows_rename(source: Path, target: Path) -> None:
+        rename_calls.append((source, target))
+        target.write_bytes(source.read_bytes())
+        source.unlink()
+
+    monkeypatch.setattr(tools.os, "name", "nt")
+    monkeypatch.setattr(tools.os, "link", denied_hard_link)
+    monkeypatch.setattr(tools.os, "rename", windows_rename)
+    tools._publish_new_file(temporary, destination, "exists")
+
+    assert rename_calls == [(temporary, destination)]
+    assert destination.read_text(encoding="utf-8") == "contents"
+    assert not temporary.exists()
+
+
+def test_atomic_new_file_publisher_fallback_preserves_existing_destination(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from autopilot_ai import tools
+
+    temporary = tmp_path / "stage.tmp"
+    destination = tmp_path / "final.txt"
+    temporary.write_text("new", encoding="utf-8")
+    destination.write_text("existing", encoding="utf-8")
+    monkeypatch.setattr(tools.os, "name", "nt")
+    monkeypatch.setattr(tools.os, "link", lambda *_: (_ for _ in ()).throw(PermissionError("denied")))
+    monkeypatch.setattr(tools.os, "rename", lambda *_: (_ for _ in ()).throw(FileExistsError("exists")))
+
+    with pytest.raises(tools.ToolError, match="destination already exists"):
+        tools._publish_new_file(temporary, destination, "The destination already exists; overwrite is not allowed.")
+    assert destination.read_text(encoding="utf-8") == "existing"
 
 
 def test_copy_file_reports_source_read_failure_without_creating_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1799,7 +1866,7 @@ def test_interactive_ordinal_selects_ambiguous_folder_and_runs_verified_search(t
     second_ml.mkdir(parents=True)
     (first_ml / "first.pdf").write_bytes(b"first")
     (second_ml / "second.pdf").write_bytes(b"second")
-    session = ConversationSession()
+    session = ConversationSession(memory=TaskMemory(":memory:"))
 
     def execute(goal: str) -> dict:
         return run_goal(goal, primary, approved_dirs=[second_root])

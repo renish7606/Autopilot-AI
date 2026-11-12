@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import sqlite3
+from threading import RLock
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -17,8 +18,14 @@ class TaskMemory:
     """Persist lightweight task history in a local database."""
 
     def __init__(self, path: Path | str = DEFAULT_MEMORY_PATH) -> None:
+        self._in_memory = str(path) == ":memory:"
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._memory_lock = RLock()
+        self._memory_connection = None
+        if self._in_memory:
+            self._memory_connection = sqlite3.connect(":memory:", timeout=10, check_same_thread=False)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(
                 """
@@ -45,6 +52,15 @@ class TaskMemory:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
+        if self._in_memory:
+            connection = self._memory_connection
+            assert connection is not None
+            with self._memory_lock:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA foreign_keys = ON")
+                with connection:
+                    yield connection
+            return
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")

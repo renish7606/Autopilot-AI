@@ -7,7 +7,7 @@ name = "autopilot-ai"
 version = "0.1.0"
 description = "A local-first, policy-bounded computer-use agent runtime."
 requires-python = ">=3.10"
-dependencies = ["pydantic>=2.0,<3.0", "playwright>=1.48,<2.0", "pywinauto>=0.6.8,<1.0", "pyautogui>=0.9.54,<1.0", "pywin32>=306; platform_system == 'Windows'"]
+dependencies = ["pydantic>=2.0,<3.0", "playwright>=1.48,<2.0", "pywinauto>=0.6.8,<1.0", "pyautogui>=0.9.54,<1.0", "pywin32>=306; platform_system == 'Windows'", "pypdf>=5.0,<6.0"]
 
 [project.scripts]
 autopilot = "autopilot_ai.cli:main"

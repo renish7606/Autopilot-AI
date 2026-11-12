@@ -189,6 +189,26 @@ def _create_directory(policy: PathPolicy, path: str) -> dict[str, Any]:
     return {"path": str(destination), "created": destination.is_dir()}
 
 
+def _publish_new_file(temporary: Path, destination: Path, exists_message: str) -> None:
+    """Publish a staged file without replacing an existing destination.
+
+    Windows rename is atomic on the same volume and refuses to overwrite an
+    existing destination. Use it only when hard-link creation is unavailable
+    due to Windows permissions; on POSIX, rename could replace an existing file.
+    """
+    try:
+        os.link(temporary, destination)
+    except FileExistsError as exc:
+        raise ToolError(exists_message) from exc
+    except PermissionError:
+        if os.name != "nt":
+            raise
+        try:
+            os.rename(temporary, destination)
+        except FileExistsError as exc:
+            raise ToolError(exists_message) from exc
+
+
 def _copy_file(policy: PathPolicy, source_path: str, destination_path: str, source_root_index: int) -> dict[str, Any]:
     source = policy.resolve_path(source_path, source_root_index)
     if not source.is_file():
@@ -211,10 +231,7 @@ def _copy_file(policy: PathPolicy, source_path: str, destination_path: str, sour
                     destination_stream.write(chunk)
                     digest.update(chunk)
                     size += len(chunk)
-        try:
-            os.link(temporary, destination)
-        except FileExistsError as exc:
-            raise ToolError("The destination already exists; overwrite is not allowed.") from exc
+        _publish_new_file(temporary, destination, "The destination already exists; overwrite is not allowed.")
     except OSError as exc:
         raise ToolExecutionError(f"Could not copy file: {exc}") from exc
     finally:
@@ -266,10 +283,7 @@ def _write_file(policy: PathPolicy, path: str, content: str, mode: str, root_ind
                 stream.flush()
                 os.fsync(stream.fileno())
             if mode == "create_new":
-                try:
-                    os.link(temporary, destination)
-                except FileExistsError as exc:
-                    raise ToolError("The destination already exists; create_new does not overwrite files.") from exc
+                _publish_new_file(temporary, destination, "The destination already exists; create_new does not overwrite files.")
                 published = True
             else:
                 os.replace(temporary, destination)

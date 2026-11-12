@@ -40,6 +40,13 @@ python -m autopilot_ai.cli --unapprove-dir "D:\Agent\down"
 python -m autopilot_ai.cli --clear-approved-dirs
 ```
 
+Manage application launch approvals separately. These flags persist normalized application names in `data/approved_apps.json`; approved apps can be launched without repeating per-run confirmation:
+
+```powershell
+python -m autopilot_ai.cli --approve-app notepad
+python -m autopilot_ai.cli --list-approved-apps
+```
+
 After approving directories, pass only the filename:
 
 ```powershell

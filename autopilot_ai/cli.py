@@ -11,6 +11,7 @@ from .approved_dirs import (
     load_approved_dirs,
     remove_approved_dirs,
 )
+from .approved_apps import ApprovedAppError, approve_app, load_approved_apps
 from .agent import run_goal
 from .conversation import ConversationSession
 from .memory import TaskMemory
@@ -31,6 +32,8 @@ def main() -> None:
     parser.add_argument("--unapprove-dir", type=Path, action="append", default=[], help="Remove a directory from the persistent search allowlist.")
     parser.add_argument("--list-approved-dirs", action="store_true", help="Show the persistent search allowlist.")
     parser.add_argument("--clear-approved-dirs", action="store_true", help="Clear the persistent search allowlist.")
+    parser.add_argument("--approve-app", type=str, action="append", default=[], help="Permanently approve an application name for launching; may be repeated.")
+    parser.add_argument("--list-approved-apps", action="store_true", help="Show applications approved for launching.")
     parser.add_argument("--planner", choices=("ollama", "heuristic"), default="ollama", help="Use local Ollama (default) or the deterministic starter planner")
     parser.add_argument("--approve", action="store_true", help="Explicitly approve the planned filesystem change (create/copy).")
     parser.add_argument("--debug", action="store_true", help="Print the full structured JSON report, including plans and verification evidence.")
@@ -40,11 +43,12 @@ def main() -> None:
     parser.add_argument("--resume", metavar="SESSION_ID", help="Continue an existing session (use with --interactive or a task goal).")
     args = parser.parse_args()
 
-    managing = bool(args.approve_dir or args.unapprove_dir or args.list_approved_dirs or args.clear_approved_dirs)
+    managing = bool(args.approve_dir or args.unapprove_dir or args.list_approved_dirs or args.clear_approved_dirs or args.approve_app or args.list_approved_apps)
     if managing and args.goal:
         parser.error("Manage approved directories in a separate command without a task goal.")
-    if sum(bool(value) for value in (args.approve_dir, args.unapprove_dir, args.list_approved_dirs, args.clear_approved_dirs)) > 1:
-        parser.error("Choose one approved-directory management operation per command.")
+    management_operations = (args.approve_dir, args.unapprove_dir, args.list_approved_dirs, args.clear_approved_dirs, args.approve_app, args.list_approved_apps)
+    if sum(bool(value) for value in management_operations) > 1:
+        parser.error("Choose one approved-directory or approved-application management operation per command.")
     if args.interactive and args.goal:
         parser.error("Use --interactive without a task goal; enter tasks at the prompt.")
     if args.interactive and args.approve:
@@ -69,6 +73,14 @@ def main() -> None:
             roots = load_approved_dirs()
             print(json.dumps({"status": "ok", "approved_dirs": [str(path) for path in roots]}, indent=2))
             return
+        if args.approve_app:
+            for app_name in args.approve_app:
+                approve_app(app_name)
+            print(json.dumps({"status": "updated", "approved_apps": sorted(load_approved_apps())}, indent=2))
+            return
+        if args.list_approved_apps:
+            print(json.dumps({"status": "ok", "approved_apps": sorted(load_approved_apps())}, indent=2))
+            return
         if args.history is not None:
             memory = TaskMemory()
             entries = memory.get_recent_history(args.history) if args.history else memory.get_recent_sessions_history()
@@ -86,7 +98,7 @@ def main() -> None:
             args.goal,
             lambda goal: run_goal(goal, args.workspace, planner=args.planner, approved_dirs=approved_dirs, approved=args.approve, desktop_delay_seconds=args.delay_seconds),
         )
-    except (ApprovedDirectoryError, ValueError) as exc:
+    except (ApprovedDirectoryError, ApprovedAppError, ValueError) as exc:
         print(json.dumps({"status": "error", "message": str(exc)}, indent=2))
         raise SystemExit(1) from exc
     print(render_report(report, debug=args.debug))
