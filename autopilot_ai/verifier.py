@@ -13,7 +13,7 @@ from .contracts import ToolResult, Verification
 from .browser import open_webpage
 from .desktop import DesktopToolError, inspect_active_window, inspect_desktop_state
 from .filename_matching import matches_filename
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit   
 
 
 def verify_command_execution(result: ToolResult) -> Verification:
