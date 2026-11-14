@@ -249,8 +249,49 @@ Multi-step tasks report `Partially completed` if earlier steps were verified but
 
 ## Current improvement phase
 
-The current work is auditing and hardening the existing search, file operations, browser navigation, terminal execution, application launch, desktop inspection, planning, verification, recovery and CLI behavior before adding capabilities. Calendar integration, additional desktop controls, task memory, and the React dashboard remain out of scope until the existing capabilities meet their acceptance criteria. Do not expose unrestricted shell execution or claim task success without verification.
+The current work is auditing and hardening the existing search, file operations, browser navigation, terminal execution, application launch, desktop inspection, planning, verification, recovery and CLI behavior before adding capabilities. Calendar integration and additional desktop controls remain out of scope until the existing capabilities meet their acceptance criteria. The React dashboard is now available as described below. Do not expose unrestricted shell execution or claim task success without verification.
 
 ## Safety boundary
 
 Registered tools are allowlisted and validate arguments with Pydantic. Search checks filename matches only, skips symlinks, reports inaccessible locations or limits as incomplete, and returns full paths. File reading accepts existing regular files under the selected workspace or approved directories, resolves a unique bare filename across those roots, rejects ambiguity, traversal, and symlinks, and independently rechecks the returned content slice, file size, and SHA-256 digest. Create-directory, copy, and write operations require `--approve`; writes are confined to approved roots, stage beside the destination, and atomically publish without automatic retries. Terminal commands run only in an approved directory; destructive commands are denied and all non-inspection commands require `--approve`. Browser access is read-only and rejects local/private destinations. Each application name requires one explicit `--approve` before it is persisted as trusted; launches use PATH, Windows App Paths, and limited standard-install discovery, then are verified by PID or executable name. Desktop inspection only reads accessibility information or captures a screenshot; desktop actions are separately allowlisted, require approval, and are checked against screen and foreground-window state. This phase does not implement deletion, calendar changes, or unrestricted command execution.
+
+## Web Dashboard
+
+Autopilot AI includes a web dashboard for interacting with the local agent.
+
+### Quick Start
+
+Build the frontend once, then launch the server:
+
+```powershell
+.\build.ps1
+python -m autopilot_ai.web
+```
+
+Open http://localhost:8000 in your browser. The backend is bound to the local machine.
+
+### Development Mode
+
+For frontend development with hot reload, run the backend and frontend in separate terminals:
+
+```powershell
+# Terminal 1: backend
+python -m autopilot_ai.web
+
+# Terminal 2: frontend
+Set-Location frontend
+npm.cmd install
+npm.cmd run dev
+```
+
+Open http://localhost:5173. Vite proxies API and WebSocket requests to the backend on port 8000.
+
+### Features
+
+- Task execution events over WebSocket
+- Approval gates for filesystem write operations
+- Session history persisted locally in SQLite
+- Tool output and verification inspector
+- Minimal grayscale interface with Inter and JetBrains Mono fonts
+
+The dashboard displays results from existing agent capabilities. It does not add file opening, browser launching, desktop control, calendar operations, or unrestricted command execution.

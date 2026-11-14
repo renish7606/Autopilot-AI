@@ -8,18 +8,18 @@ def main() -> None:
 
     from .server import app
 
-    dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
-    if dist.is_dir():
+    index_file = Path(__file__).resolve().parents[2] / "frontend" / "dist" / "index.html"
+    if index_file.is_file():
         from fastapi.staticfiles import StaticFiles
 
-        app.mount("/", StaticFiles(directory=str(dist), html=True), name="frontend")
-        print("Serving the built dashboard and API.")
+        app.mount("/", StaticFiles(directory=str(index_file.parent), html=True), name="frontend")
+        print("Mode: production (serving the built dashboard and API).", flush=True)
     else:
-        print("Dashboard assets are not built; use the Vite dev server for the frontend.")
+        print("Mode: development (dashboard build not found; run the Vite dev server separately).", flush=True)
 
     host = "127.0.0.1"
     port = 8000
-    print(f"Autopilot AI server starting at http://{host}:{port}")
+    print(f"Autopilot AI server starting at http://{host}:{port}", flush=True)
     uvicorn.run(app, host=host, port=port, reload=False)
 
 

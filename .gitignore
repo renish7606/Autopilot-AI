@@ -10,3 +10,9 @@ down/models/
 down/pip-cache/
 down/playwright-browsers/
 down/screenshots/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+down/npm-cache/
