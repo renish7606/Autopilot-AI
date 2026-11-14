@@ -21,6 +21,19 @@ function prettyStatus(status: string): string {
   return status.replace(/_/g, " ").replace(/^./, (character: string) => character.toUpperCase());
 }
 
+function UnsupportedCard({ message }: { message: string }) {
+  return <article className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+    <h3 className="text-sm font-medium text-zinc-200">Not supported yet</h3>
+    <p className="mt-2 text-sm leading-6 text-zinc-400">{message}</p>
+    <p className="mt-3 text-xs font-medium text-zinc-500">Try a supported request:</p>
+    <ul className="mt-2 list-inside list-disc space-y-1 text-xs leading-5 text-zinc-500">
+      <li>Show files or search filenames in the approved workspace</li>
+      <li>Search the web or read a public webpage</li>
+      <li>Inspect the active desktop window</li>
+    </ul>
+  </article>;
+}
+
 export default function CommandFeed({ events, history, isRunning, isConnected, activeSessionId, pendingApproval, onSubmit, onApprove, onDeny }: CommandFeedProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const [deniedApproval, setDeniedApproval] = useState<AgentEvent | null>(null);
@@ -77,11 +90,32 @@ export default function CommandFeed({ events, history, isRunning, isConnected, a
               case "task_failed": {
                 const report = event.report;
                 const success = event.event === "task_completed";
+                if (report?.status === "unsupported") {
+                  return <UnsupportedCard key={`${index}-unsupported`} message={report.message ?? "This request is outside the agent's current supported tools."} />;
+                }
+                if (report?.status === "approval_required") {
+                  const approval: AgentEvent = {
+                    event: "approval_required",
+                    goal: report.goal,
+                    session_id: report.session_id ?? activeSessionId ?? undefined,
+                    plan: report.plan,
+                    message: report.message,
+                  };
+                  return <ApprovalCard key={`${index}-approval`} event={approval} onApprove={() => {
+                    if (approval.goal && approval.session_id) onApprove(approval.goal, approval.session_id);
+                  }} onDeny={onDeny} />;
+                }
+                const failureHint = report?.status === "denied"
+                  ? "Check that the path is inside an approved folder and that the requested operation is allowed."
+                  : /HTTP 403|returned HTTP 403/i.test(report?.message ?? "")
+                    ? "Some websites block automated requests. Try a public page such as https://example.com."
+                    : "Check that the file or folder exists and is approved. If local planning failed, try the Heuristic planner.";
                 return <article key={`${index}-final`} className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
                   <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${success ? "bg-green-500" : "bg-red-500"}`} /><h3 className="text-sm font-medium text-zinc-200">{success ? "Task finished" : "Task failed"}</h3></div>
                   {report?.summary && <p className="mt-2 text-sm leading-6 text-zinc-400">{report.summary}</p>}
                   {report?.message && <p className="mt-2 text-sm leading-6 text-zinc-400">{report.message}</p>}
                   {!report?.summary && !report?.message && <p className="mt-2 text-xs text-zinc-500">{report?.status ? prettyStatus(report.status) : success ? "Completed" : "Failed"}</p>}
+                  {!success && <p className="mt-3 text-xs leading-5 text-zinc-500"><span className="font-medium text-zinc-400">Try this:</span> {failureHint}</p>}
                   {report?.planner_note && <p className="mt-2 text-xs text-zinc-600">{report.planner_note}</p>}
                 </article>;
               }

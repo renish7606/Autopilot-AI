@@ -101,7 +101,7 @@ def _requested_folder(goal: str) -> str | None:
         folded = folder.casefold()
         if (
             not folder
-            or folded in {"approved", "my approved", "this", "the approved", "this folder", "the folder", "my folder"}
+            or folded in {"approved", "my approved", "this", "the approved", "this folder", "the folder", "my folder", "workspace", "the workspace"}
             or folded.endswith((" folder", " folders", " directory", " directories", " workspace", " computer"))
         ):
             return None
@@ -166,6 +166,20 @@ def plan_goal(goal: str) -> PlanStep:
     desktop_step = _plan_desktop_action(goal)
     if desktop_step is not None:
         return desktop_step
+    if re.fullmatch(
+        r"(?:please\s+)?(?:run|execute)\s+(?:the\s+)?dir(?:ectory)?(?:\s+command)?(?:\s+in\s+(?:the\s+)?workspace)?",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    ):
+        return PlanStep(
+            step_id="step-1",
+            description="List the approved workspace with the read-only dir command.",
+            tool_name="run_command",
+            arguments={"command": "dir", "working_dir": ".", "root_index": 0},
+            expected_result="The command exits successfully and its process result is independently checked.",
+            risk_level="low",
+            requires_approval=False,
+        )
     command_match = re.fullmatch(
         r"(?:please\s+)?(?:run\s+in\s+cmd|run|execute|cmd)\s+(?:command\s+)?['\"]?(.+?)['\"]?",
         goal.strip(),
@@ -386,10 +400,14 @@ def plan_goal(goal: str) -> PlanStep:
             query = re.sub(r"[?.!]+$", "", query).strip()
         if not query or query.casefold().strip(" .!?") in {"file", "files", "a file", "a files", "named", "called", "containing", "with", "for"}:
             raise ClarificationRequired("What filename or part of a filename should I search for?")
+        search_mode = "contains" if (
+            any(term in normalized for term in ("containing", "contains", "substring", "partial"))
+            or (not looks_like_filename and not Path(query).suffix)
+        ) else "exact"
         arguments = {
             "path": folder_scope or ".",
             "query": query,
-            "match_mode": "contains" if any(term in normalized for term in ("containing", "contains", "substring", "partial")) else "exact",
+            "match_mode": search_mode,
             "max_results": 100,
         }
         if folder_scope:

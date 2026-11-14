@@ -39,6 +39,16 @@ _ALLOWED_ORIGINS = frozenset({
 })
 _MAX_GOAL_LENGTH = 2000
 _MAX_MESSAGE_LENGTH = 16_384
+_APPROVED_APPS_QUERIES = frozenset({
+    "what apps are approved",
+    "list approved apps",
+    "show approved apps",
+})
+_APPROVED_DIRS_QUERIES = frozenset({
+    "what folders are approved",
+    "list approved dirs",
+    "show approved dirs",
+})
 
 
 @app.websocket("/ws/agent")
@@ -150,6 +160,36 @@ async def _run_and_report(
     session_id = session.session_id
     await _send_event(ws, "task_started", goal=goal, session_id=session_id)
     await _send_event(ws, "planning", planner=planner)
+
+    normalized_goal = goal.strip().casefold().rstrip("?.")
+    if normalized_goal in _APPROVED_APPS_QUERIES or normalized_goal in _APPROVED_DIRS_QUERIES:
+        try:
+            if normalized_goal in _APPROVED_APPS_QUERIES:
+                approved_values = await asyncio.to_thread(load_approved_apps)
+                label = "Approved apps"
+                values = sorted(approved_values)
+            else:
+                approved_values = await asyncio.to_thread(load_approved_dirs)
+                label = "Approved dirs"
+                values = [str(directory) for directory in approved_values]
+            meta_report = {
+                "status": "completed",
+                "goal": goal,
+                "message": f"{label}: {', '.join(values) if values else 'None approved yet.'}",
+            }
+            report = await asyncio.to_thread(session.handle, goal, lambda _goal: dict(meta_report))
+        except Exception as exc:
+            _pending_approvals.pop(session_id, None)
+            await _send_event(
+                ws,
+                "task_failed",
+                report={"status": "error", "goal": goal, "message": f"Could not read the approved list: {exc}"},
+            )
+            return
+        _pending_approvals.pop(session_id, None)
+        await _send_event(ws, "task_completed", report=_serialize(report))
+        return
+
     try:
         approved_dirs = load_approved_dirs()
 

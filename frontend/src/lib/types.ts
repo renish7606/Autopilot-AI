@@ -51,6 +51,7 @@ export interface StepReport {
 export interface AgentReport {
   status: string;
   goal: string;
+  session_id?: string;
   planner?: string;
   approved_roots?: string[];
   plan?: PlanStep;

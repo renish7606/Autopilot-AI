@@ -1818,6 +1818,11 @@ def test_missing_required_details_request_clarification(tmp_path: Path, goal: st
         ("Duplicate file source.txt to backup.txt", "copy_file", {"source_path": "source.txt", "destination_path": "backup.txt"}),
         ("Open the website https://example.com", "open_webpage", {"url": "https://example.com"}),
         ("Browse https://example.com", "open_webpage", {"url": "https://example.com"}),
+        ("Show files in workspace", "list_directory", {"path": "."}),
+        ("Search for autopilot in workspace", "search_files", {"path": ".", "query": "autopilot", "match_mode": "contains", "max_results": 100}),
+        ("Find .pdf files in workspace", "search_files", {"path": ".", "query": "", "match_mode": "exact", "extensions": [".pdf"], "max_results": 100}),
+        ("Find .txt files in workspace", "search_files", {"path": ".", "query": "", "match_mode": "exact", "extensions": [".txt"], "max_results": 100}),
+        ("Run dir command in workspace", "run_command", {"command": "dir", "working_dir": ".", "root_index": 0}),
         ("Find me a file named report.pdf", "search_files", {"path": ".", "query": "report.pdf", "match_mode": "exact", "max_results": 100}),
         ("Search for the file called report.pdf", "search_files", {"path": ".", "query": "report.pdf", "match_mode": "exact", "max_results": 100}),
         ("Locate report.pdf on my computer", "search_files", {"path": ".", "query": "report.pdf", "match_mode": "exact", "max_results": 100}),
@@ -1829,6 +1834,48 @@ def test_common_paraphrases_keep_the_same_bounded_tool_intent(goal: str, tool_na
 
     assert plan.tool_name == tool_name
     assert plan.arguments == expected_arguments
+
+
+def test_workspace_dir_quick_action_is_read_only_and_needs_no_approval() -> None:
+    plan = plan_goal_steps("Run dir command in workspace")[0]
+
+    assert plan.risk_level == "low"
+    assert plan.requires_approval is False
+
+
+def test_workspace_dir_quick_action_runs_and_verifies(tmp_path: Path) -> None:
+    (tmp_path / "visible.txt").write_text("smoke test", encoding="utf-8")
+
+    report = run_goal("Run dir command in workspace", tmp_path, planner="heuristic")
+
+    assert report["status"] == "completed"
+    assert report["plan"]["arguments"]["command"] == "dir"
+    assert "visible.txt" in report["tool_result"]["output"]["stdout"]
+    assert report["verification"]["passed"] is True
+
+
+def test_workspace_search_quick_action_finds_partial_name(tmp_path: Path) -> None:
+    target = tmp_path / "autopilot-overview.txt"
+    target.write_text("agent overview", encoding="utf-8")
+
+    report = run_goal("Search for autopilot in workspace", tmp_path, planner="heuristic")
+
+    assert report["status"] == "completed"
+    assert report["tool_result"]["output"]["matches"] == [str(target.resolve())]
+    assert report["verification"]["passed"] is True
+
+
+def test_workspace_extension_quick_action_searches_workspace_root(tmp_path: Path) -> None:
+    pdf_file = tmp_path / "guide.pdf"
+    text_file = tmp_path / "notes.txt"
+    pdf_file.write_bytes(b"pdf placeholder")
+    text_file.write_text("text placeholder", encoding="utf-8")
+
+    report = run_goal("Find .pdf files in workspace", tmp_path, planner="heuristic")
+
+    assert report["status"] == "completed"
+    assert report["tool_result"]["output"]["matches"] == [str(pdf_file.resolve())]
+    assert report["verification"]["passed"] is True
 
 
 @pytest.mark.parametrize(

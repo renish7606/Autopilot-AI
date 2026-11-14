@@ -1,10 +1,10 @@
 # AutoPilot AI
 
-AutoPilot AI is a local-first autonomous computer-use agent, developed in verified phases. The current CLI can plan and execute bounded filesystem tasks, read approved file contents, selected terminal commands, read-only browser tasks, launch installed Windows applications, inspect and perform approved actions in the active Windows window, and persist task history across sessions; calendar integration and a dashboard remain future phases.
+AutoPilot AI is a local-first autonomous computer-use agent, developed in verified phases. The CLI and local web dashboard can plan and execute bounded filesystem tasks, read approved file contents, run selected terminal commands, navigate read-only browser tasks, launch installed Windows applications, inspect and perform approved actions in the active Windows window, and persist task history across sessions. Calendar integration remains a future phase.
 
 ## Current phase
 
-The current runnable slice accepts a natural-language request, asks one local Ollama model for a schema-constrained plan by default, validates each proposal against deterministic intent, registered tools, and policy, and verifies results. Read-only directory listing and recursive filename search can be combined in sequences of up to three steps; each is verified before the next starts. Approved text, code, Markdown, JSON/CSV, and PDF files can be read with a character limit, and their returned slice and SHA-256 digest are independently checked with a fresh disk read. Controlled file changes include creating a directory, copying a file, and creating or updating a text file within an approved workspace; each requires `--approve`, rejects path escapes, and is independently verified. Terminal commands run only from an approved working directory; destructive commands are blocked, and non-inspection commands require `--approve`. An application launch requires `--approve` once per application name; successful approvals are stored locally and later launches of that same application run directly. Launches are verified from the Windows process list. Playwright opens public HTTP/HTTPS pages in a fresh context and verifies them in another. Web search uses the no-key `ddgs` metasearch package and validates query, ranking, result structure, and link format; it returns titles and provider snippets, not a generated summary. Windows UI Automation can inspect the foreground window; if UIA fails, PyAutoGUI saves a screenshot under `D:\Agent\down\screenshots`. Eligible read-only local, browser, and desktop tools can get one bounded retry after transient execution errors or failed verification; web search does not retry to avoid compounding provider rate limits. File changes, terminal commands, and application launches are never automatically repeated. Unsupported model plans fall back to deterministic intent parsing. The CLI is the initial interface; React is intentionally deferred.
+The current runnable slice accepts a natural-language request, asks one local Ollama model for a schema-constrained plan by default, validates each proposal against deterministic intent, registered tools, and policy, and verifies results. Read-only directory listing and recursive filename search can be combined in sequences of up to three steps; each is verified before the next starts. Approved text, code, Markdown, JSON/CSV, and PDF files can be read with a character limit, and their returned slice and SHA-256 digest are independently checked with a fresh disk read. Controlled file changes include creating a directory, copying a file, and creating or updating a text file within an approved workspace; each requires `--approve`, rejects path escapes, and is independently verified. Terminal commands run only from an approved working directory; destructive commands are blocked, and non-inspection commands require `--approve`. An application launch requires `--approve` once per application name; successful approvals are stored locally and later launches of that same application run directly. Launches are verified from the Windows process list. Playwright opens public HTTP/HTTPS pages in a fresh context and verifies them in another. Web search uses the no-key `ddgs` metasearch package and validates query, ranking, result structure, and link format; it returns titles and provider snippets, not a generated summary. Windows UI Automation can inspect the foreground window; if UIA fails, PyAutoGUI saves a screenshot under `D:\Agent\down\screenshots`. Eligible read-only local, browser, and desktop tools can get one bounded retry after transient execution errors or failed verification; web search does not retry to avoid compounding provider rate limits. File changes, terminal commands, and application launches are never automatically repeated. Unsupported model plans fall back to deterministic intent parsing. The CLI and local React dashboard are the available interfaces.
 
 The local planner connects to Ollama at `http://127.0.0.1:11434` and defaults to `qwen2.5:0.5b`; override it with `AUTOPILOT_MODEL`. The development setup has Qwen installed under `D:\Agent\down\models`. Keep Ollama running to use model planning; supported requests can fall back to the deterministic planner if Ollama is unavailable or returns a plan that does not match the request. The observed machine profile was 7.7 GiB RAM, 0.84 GiB available RAM, a 12th Gen Intel Core i5-1235U with 12 logical CPUs, and 196 GiB free on D:. Runtime headroom should still be measured before choosing a larger model.
 
@@ -295,3 +295,29 @@ Open http://localhost:5173. Vite proxies API and WebSocket requests to the backe
 - Minimal grayscale interface with Inter and JetBrains Mono fonts
 
 The dashboard displays results from existing agent capabilities. It does not add file opening, browser launching, desktop control, calendar operations, or unrestricted command execution.
+
+### Example requests
+
+Choose **Heuristic** for deterministic examples or **Ollama** to test local-model planning:
+
+```text
+Open https://python.org
+Search for autopilot in workspace
+Show files in workspace
+Find .txt files in workspace
+Inspect active window
+Search the web for Python 3.12 release notes
+What apps are approved?
+What folders are approved?
+```
+
+These requests are read-only. Some websites may block automated browsing, and web search can be temporarily unavailable.
+
+The following actions start an application or change files. Review the approval card before approving:
+
+```text
+Open Notepad
+Create folder test-output
+```
+
+`Run dir command in workspace` is a read-only listing and does not require approval under the current command policy.
