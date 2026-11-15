@@ -78,11 +78,12 @@ To search filenames recursively:
 python -m autopilot_ai.cli "Find files containing budget"
 ```
 
-To read an existing file, use a relative path under the selected workspace or an approved directory. A bare filename is looked up across approved roots, including nested folders, when it identifies one unique file. If multiple files share the name, specify a relative path. Absolute paths work only when they remain inside an approved root. Text and supported code/data files are decoded as UTF-8 with replacement for invalid bytes; PDFs are read with `pypdf`. A PDF page can be supplied through a direct tool call; natural-language requests read the whole PDF. `Open analysis.pdf` and `Open file notes.md` mean read the supported file's contents; they do not start a GUI document viewer. Output is limited to 8,000 characters by default.
+To read an existing file, use a relative path under the selected workspace or an approved directory. A bare filename is looked up across approved roots, including nested folders, when it identifies one unique file. If multiple files share the name, specify a relative path. Absolute paths work only when they remain inside an approved root. Text and supported code/data files are decoded as UTF-8 with replacement for invalid bytes; PDFs are read with `pypdf`. A PDF page can be supplied through a direct tool call; natural-language read requests read the whole PDF. `Open analysis.pdf` asks Windows to open it in the default PDF viewer and requires approval. Use `Read analysis.pdf` to extract its text instead. Opening is restricted to existing PDFs inside approved directories, and the active window title must identify the PDF for verification to pass. Output from PDF text reads is limited to 8,000 characters by default.
 
 ```powershell
 python -m autopilot_ai.cli "Read file README.md" --planner heuristic --workspace D:\Agent
 python -m autopilot_ai.cli "Show contents of file notes.txt" --planner heuristic
+python -m autopilot_ai.cli "Open Renish_Resume.pdf" --planner heuristic --approve
 ```
 
 To find files by extension in the workspace and approved search folders:

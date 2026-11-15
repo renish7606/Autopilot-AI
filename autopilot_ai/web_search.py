@@ -35,7 +35,14 @@ def search_web(query: str, max_results: int = 5) -> dict:
     except ImportError as exc:
         raise WebSearchError("Web search needs the 'ddgs' package. Install project dependencies with: python -m pip install -r requirements.txt") from exc
     try:
-        raw_results = DDGS(timeout=10).text(args.query, max_results=args.max_results, backend="auto")
+        # `auto` currently selects Yahoo among its engines on some installs;
+        # Yahoo can stall even when other free providers are reachable. Use an
+        # explicit provider set so one provider's outage does not dominate.
+        raw_results = DDGS(timeout=15).text(
+            args.query,
+            max_results=args.max_results,
+            backend="duckduckgo,brave,mojeek,wikipedia",
+        )
     except Exception as exc:
         # ddgs raises this exact exception when its backend completed without
         # any hits; that is a valid empty search response, unlike a timeout or
@@ -48,7 +55,10 @@ def search_web(query: str, max_results: int = 5) -> dict:
         if is_empty_results:
             raw_results = []
         else:
-            raise WebSearchError(f"DuckDuckGo search failed: {exc}") from exc
+            raise WebSearchError(
+                f"Web search providers (DuckDuckGo, Brave, Mojeek, Wikipedia) did not return results: {exc}. "
+                "Check internet access or try again later."
+            ) from exc
     if raw_results is None:
         raise WebSearchError("DuckDuckGo returned no result payload.")
 
@@ -82,4 +92,4 @@ def search_web(query: str, max_results: int = 5) -> dict:
                 break
     except Exception as exc:
         raise WebSearchError(f"Could not normalize DuckDuckGo results: {exc}") from exc
-    return {"query": args.query, "provider": "DDGS metasearch", "results": results, "count": len(results)}
+    return {"query": args.query, "provider": "DDGS multi-provider metasearch", "results": results, "count": len(results)}

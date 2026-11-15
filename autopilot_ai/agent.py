@@ -11,7 +11,7 @@ from .planner import ClarificationRequired, ModelPlannerError, PlanningError, pl
 from .policy import PathPolicy, PolicyError, command_risk
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
-from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_web_search, verify_desktop_action, verify_desktop_inspection, verify_written_file
+from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_web_search, verify_desktop_action, verify_desktop_inspection, verify_written_file, verify_pdf_open
 
 
 class AmbiguousSearchScope(ValueError):
@@ -253,7 +253,7 @@ def run_goal(
                 }
             except (TypeError, ValueError, OSError, RuntimeError) as exc:
                 return {"status": "denied", "goal": goal, "message": f"Search folder rejected: {exc}"}
-        elif step.tool_name == "read_file_contents":
+        elif step.tool_name in {"read_file_contents", "open_pdf"}:
             try:
                 resolved_scope = _resolve_read_scope(policy, step.arguments)
                 step = step.model_copy(update={"arguments": resolved_scope})
@@ -295,6 +295,8 @@ def run_goal(
             step = step.model_copy(update={"risk_level": "medium", "requires_approval": True})
         elif step.tool_name == "desktop_action":
             step = step.model_copy(update={"risk_level": "medium", "requires_approval": True})
+        elif step.tool_name == "open_pdf":
+            step = step.model_copy(update={"risk_level": "medium", "requires_approval": True})
         try:
             if step.tool_name == "write_file":
                 mode = step.arguments["mode"]
@@ -335,10 +337,12 @@ def run_goal(
             elif step.tool_name == "launch_app":
                 target = None
                 source = None
-            elif step.tool_name == "read_file_contents":
+            elif step.tool_name in {"read_file_contents", "open_pdf"}:
                 target = policy.resolve_path(step.arguments["path"], step.arguments["root_index"])
-                if not target.is_file():
+                if not target.is_file() or target.is_symlink():
                     return {"status": "denied", "goal": goal, "message": "The requested path must be an existing regular file inside an approved directory."}
+                if step.tool_name == "open_pdf" and target.suffix.casefold() != ".pdf":
+                    return {"status": "denied", "goal": goal, "message": "Only PDF files can be opened with the PDF viewer tool."}
                 source = None
             elif step.tool_name == "copy_file":
                 source = policy.resolve_path(step.arguments["source_path"], step.arguments.get("source_root_index", 0))
@@ -362,7 +366,10 @@ def run_goal(
         except (TypeError, ValueError, OSError, RuntimeError) as exc:
             return {"status": "denied", "goal": goal, "message": f"Plan path rejected: {exc}"}
         if step.requires_approval and not approved:
-            return {"status": "approval_required", "goal": goal, "planner": planner_used, "plan": step.model_dump(), "message": "This operation requires approval. Review the plan, then rerun with --approve to execute it."}
+            approval_report = {"status": "approval_required", "goal": goal, "planner": planner_used, "plan": step.model_dump(), "message": "This operation requires approval. Review the plan, then rerun with --approve to execute it."}
+            if step.tool_name == "open_pdf":
+                approval_report["resolved_path"] = str(target)
+            return approval_report
         if step.tool_name == "inspect_active_window" and desktop_delay_seconds:
             time.sleep(desktop_delay_seconds)
         attempt_history = []
@@ -399,6 +406,8 @@ def run_goal(
                 verification = verify_app_launch(result)
             elif step.tool_name == "read_file_contents":
                 verification = verify_file_contents(result, target, step.arguments["max_characters"], step.arguments["page_number"])
+            elif step.tool_name == "open_pdf":
+                verification = verify_pdf_open(result, target)
             else:
                 return {"status": "denied", "goal": goal, "message": "No verifier is registered for the selected tool."}
             attempt_history.append({

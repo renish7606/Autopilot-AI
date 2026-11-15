@@ -60,6 +60,50 @@ def verify_app_launch(result: ToolResult) -> Verification:
     )
 
 
+def _foreground_window_title() -> str:
+    """Read the current Windows foreground-window title without capturing a screenshot."""
+    import win32gui
+
+    handle = win32gui.GetForegroundWindow()
+    return str(win32gui.GetWindowText(handle) or "") if handle else ""
+
+
+def verify_pdf_open(result: ToolResult, file_path: Path) -> Verification:
+    """Confirm Windows accepted the PDF and its viewer surfaced the file title."""
+    if result.status != "success":
+        return Verification(passed=False, summary="Windows did not accept the PDF open request.", evidence={"status": result.status, "error_code": result.error_code})
+    output = result.output
+    if (
+        output.get("path") != str(file_path)
+        or output.get("open_request_sent") is not True
+        or not file_path.is_file()
+        or file_path.is_symlink()
+    ):
+        return Verification(passed=False, summary="The PDF open request or file state could not be verified.", evidence={"path": str(file_path), "tool_output": output})
+    expected = file_path.name.casefold()
+    observed_titles: list[str] = []
+    try:
+        for attempt in range(10):
+            title = _foreground_window_title()
+            if title:
+                observed_titles.append(title)
+            if expected in title.casefold():
+                return Verification(
+                    passed=True,
+                    summary="The active Windows viewer title identifies the requested PDF.",
+                    evidence={"path": str(file_path), "window_title": title, "title_matches_file": True},
+                )
+            if attempt < 9:
+                time.sleep(0.5)
+    except Exception as exc:
+        return Verification(passed=False, summary="Could not inspect the active Windows window to confirm the PDF opened.", evidence={"path": str(file_path), "error": str(exc)})
+    return Verification(
+        passed=False,
+        summary="Windows accepted the request, but the active window did not identify the PDF; check whether a viewer opened in the background.",
+        evidence={"path": str(file_path), "expected_filename": file_path.name, "observed_window_titles": observed_titles[-3:], "title_matches_file": False},
+    )
+
+
 def verify_file_contents(result: ToolResult, file_path: Path, max_characters: int, page_number: int | None) -> Verification:
     """Re-read the approved file and compare its digest and returned content slice."""
     if result.status != "success":
@@ -322,7 +366,7 @@ def verify_web_search(result: ToolResult, requested_query: str, max_results: int
     rows = output.get("results")
     if (
         output.get("query") != requested_query.strip()
-        or output.get("provider") != "DDGS metasearch"
+        or output.get("provider") != "DDGS multi-provider metasearch"
         or not isinstance(rows, list)
         or len(rows) > max_results
         or output.get("count") != len(rows)

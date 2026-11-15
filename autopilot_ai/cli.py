@@ -292,6 +292,13 @@ def format_report(report: dict) -> str:
                     lines.append(f"  Content: {content[:1000]}")
                 if output.get("truncated"):
                     lines.append("  Output was truncated; use --debug for the full returned slice metadata.")
+            elif plan.get("tool_name") == "open_pdf":
+                pdf_path = output.get("path") or report.get("resolved_path") or plan.get("arguments", {}).get("path", "(not available)")
+                lines.append(f"  PDF: {pdf_path}")
+                if report.get("status") == "approval_required":
+                    lines.append("  This will open in the Windows default PDF viewer after approval.")
+                if result.get("status") == "success" and item.get("verification", {}).get("passed"):
+                    lines.append("  Opened with the Windows default PDF viewer.")
             elif plan.get("tool_name") == "open_webpage":
                 if result.get("status") == "success":
                     lines.append(f"  Page: {output.get('title', '(untitled)')} — {output.get('url', '')}")
@@ -323,7 +330,7 @@ def format_report(report: dict) -> str:
             if verification:
                 label = "passed" if verification.get("passed") else "failed"
                 lines.append(f"  Verification: {label}. {verification.get('summary', '')}".rstrip())
-            if result.get("status") != "success":
+            if "tool_result" in item and result.get("status") != "success":
                 detail = output.get("detail", result.get("error_code", "Operation failed."))
                 lines.append(f"  Error: {detail}")
             if output.get("warning"):

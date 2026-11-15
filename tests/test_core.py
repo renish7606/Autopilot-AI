@@ -21,7 +21,7 @@ from autopilot_ai.policy import PathPolicy, PolicyError
 from autopilot_ai.recovery import should_retry
 from autopilot_ai.session_state import SessionState
 from autopilot_ai.tools import APP_ALIASES, ToolArgumentsError, ToolRegistry, _resolve_app_executable
-from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_action, verify_desktop_inspection, verify_directory_listing, verify_file_contents, verify_webpage_open, verify_written_file
+from autopilot_ai.verifier import verify_app_launch, verify_command_execution, verify_desktop_action, verify_desktop_inspection, verify_directory_listing, verify_file_contents, verify_webpage_open, verify_written_file, verify_pdf_open
 
 
 def test_run_command_safe_execution_is_verified(tmp_path: Path) -> None:
@@ -283,13 +283,43 @@ def test_desktop_action_rejects_edge_coordinates_and_is_never_retried(
     assert should_retry("desktop_action", result, Verification(passed=False, summary="denied"), 1) is False
 
 
-@pytest.mark.parametrize("goal", ["Open analysis.pdf", "Open file analysis.pdf", 'Please open the file "analysis.pdf"'])
-def test_open_supported_document_is_planned_as_file_read(goal: str) -> None:
+@pytest.mark.parametrize("goal", ["Open analysis.pdf", "Open file analysis.pdf", 'Please open the file "analysis.pdf"', "Open Renish_Resume.pdf file"])
+def test_open_pdf_is_planned_for_approved_viewer_launch(goal: str) -> None:
     plan = plan_goal_steps(goal)[0]
 
-    assert plan.tool_name == "read_file_contents"
-    assert plan.arguments["path"] == "analysis.pdf"
-    assert plan.requires_approval is False
+    assert plan.tool_name == "open_pdf"
+    expected_path = "Renish_Resume.pdf" if "Renish_Resume" in goal else "analysis.pdf"
+    assert plan.arguments["path"] == expected_path
+    assert plan.requires_approval is True
+
+
+def test_open_pdf_requires_approval_then_uses_windows_default_viewer_and_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"not parsed by viewer launcher")
+    opened: list[str] = []
+    monkeypatch.setattr("autopilot_ai.tools.os.startfile", lambda path, operation: opened.append(path), raising=False)
+    monkeypatch.setattr("autopilot_ai.verifier._foreground_window_title", lambda: "resume.pdf - PDF Viewer")
+
+    preview = run_goal("Open resume.pdf", tmp_path, planner="heuristic")
+    assert preview["status"] == "approval_required"
+    assert preview["plan"]["tool_name"] == "open_pdf"
+    assert opened == []
+    preview_text = render_report(preview)
+    assert f"PDF: {pdf}" in preview_text
+    assert "after approval" in preview_text
+    assert "Error: Operation failed." not in preview_text
+
+    report = run_goal("Open resume.pdf", tmp_path, planner="heuristic", approved=True)
+    assert report["status"] == "completed"
+    assert opened == [str(pdf)]
+    assert report["verification"]["passed"] is True
+    assert report["verification"]["evidence"]["title_matches_file"] is True
+
+
+def test_read_pdf_remains_a_distinct_text_extraction_request() -> None:
+    assert plan_goal_steps("Read resume.pdf")[0].tool_name == "read_file_contents"
 
 
 def test_open_file_name_reads_approved_text_file(tmp_path: Path) -> None:
@@ -1061,7 +1091,7 @@ def test_search_web_tool_normalizes_limits_and_verifies_provider_results(monkeyp
 
     class FakeDDGS:
         def __init__(self, timeout: int) -> None:
-            assert timeout == 10
+            assert timeout == 15
 
         def text(self, query: str, max_results: int, backend: str) -> list[dict[str, str]]:
             calls.append((query, max_results, backend))
@@ -1075,8 +1105,8 @@ def test_search_web_tool_normalizes_limits_and_verifies_provider_results(monkeyp
     result = ToolRegistry(PathPolicy(tmp_path)).execute("search_web", {"query": "  Python 3.12 release notes  ", "max_results": 5})
 
     assert result.status == "success"
-    assert calls == [("Python 3.12 release notes", 5, "auto")]
-    assert result.output["provider"] == "DDGS metasearch"
+    assert calls == [("Python 3.12 release notes", 5, "duckduckgo,brave,mojeek,wikipedia")]
+    assert result.output["provider"] == "DDGS multi-provider metasearch"
     assert result.output["count"] == 1
     assert result.output["results"][0]["rank"] == 1
     verification = verify_web_search(result, "Python 3.12 release notes", 5)
@@ -1128,7 +1158,7 @@ def test_search_web_treats_ddgs_no_results_exception_as_verified_empty_search(mo
 def test_heuristic_search_google_phrase_selects_duckduckgo_and_preserves_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from autopilot_ai import tools
 
-    page = {"query": "Python 3.12 release notes", "provider": "DDGS metasearch", "count": 1,
+    page = {"query": "Python 3.12 release notes", "provider": "DDGS multi-provider metasearch", "count": 1,
             "results": [{"rank": 1, "title": "Python 3.12 What's New", "url": "https://docs.python.org/3.12/whatsnew/3.12.html", "snippet": "Release notes and highlights."}]}
     monkeypatch.setattr(tools, "search_web", lambda query, max_results=5: page)
 
@@ -1139,7 +1169,7 @@ def test_heuristic_search_google_phrase_selects_duckduckgo_and_preserves_query(t
     assert report["plan"]["arguments"]["query"] == "Python 3.12 release notes"
     assert report["verification"]["passed"] is True
     output = render_report(report)
-    assert "Provider: DDGS metasearch" in output
+    assert "Provider: DDGS multi-provider metasearch" in output
     assert "Python 3.12 What's New" in output
     assert "Top-result snippet: Release notes and highlights." in output
 

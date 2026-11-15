@@ -25,6 +25,7 @@ export default function StepCard({ event }: StepCardProps) {
       </div>
       <p className="mt-3 text-sm leading-5 text-zinc-200">{event.plan?.description ?? "Execution step"}</p>
       {event.verification?.summary && <p className="mt-2 text-xs leading-5 text-zinc-500">{event.verification.summary}</p>}
+      {event.report?.planner_note && <p className="mt-2 text-[11px] italic text-zinc-600">{event.report.planner_note}</p>}
       {output !== undefined && (
         <div className="mt-3 border-t border-zinc-800 pt-2">
           <button type="button" onClick={() => setExpanded((value) => !value)} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-200" aria-expanded={expanded}>

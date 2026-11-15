@@ -69,7 +69,7 @@ export function useAgent(): AgentClient {
         }
         if (event.event === "approval_required") setPendingApproval(event);
         if (event.event === "task_started") setIsRunning(true);
-        if (["task_completed", "task_failed", "error"].includes(event.event)) setIsRunning(false);
+        if (["task_completed", "task_failed", "error", "clarification", "approval_required"].includes(event.event)) setIsRunning(false);
         if (event.event === "task_completed" || event.event === "task_failed") setPendingApproval(null);
         appendEvent(event);
       };
@@ -107,11 +107,13 @@ export function useAgent(): AgentClient {
   const sendGoal = useCallback((goal: string, options: RunOptions = {}) => {
     const cleanGoal = goal.trim();
     if (!cleanGoal) return;
-    setEvents([]);
+    const lastEvent = events[events.length - 1];
+    const isClarificationReply = lastEvent?.event === "clarification";
+    if (!isClarificationReply) setEvents([]);
     setPendingApproval(null);
     setIsRunning(true);
     send({ type: "run_goal", goal: cleanGoal, ...(currentSessionId ? { session_id: currentSessionId } : {}), ...options });
-  }, [currentSessionId, send]);
+  }, [currentSessionId, events, send]);
 
   const sendApproval = useCallback((goal: string, sessionId: string) => {
     setPendingApproval(null);

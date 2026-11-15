@@ -14,6 +14,8 @@ const QUICK_ACTIONS = [
   "Open https://example.com",
   "Run dir command in workspace",
   "Open Notepad",
+  "Search the web for Python 3.12 release notes",
+  "Inspect active window",
 ];
 
 export default function InputBar({ isRunning, isConnected, onSubmit }: InputBarProps) {

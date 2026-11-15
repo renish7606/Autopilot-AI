@@ -105,8 +105,16 @@ export default function CommandFeed({ events, history, isRunning, isConnected, a
                     if (approval.goal && approval.session_id) onApprove(approval.goal, approval.session_id);
                   }} onDeny={onDeny} />;
                 }
+                const plannedStderr = report?.plan?.arguments?.stderr;
+                const output = report?.tool_result?.output;
+                const outputStderr = typeof output === "object" && output !== null && "stderr" in output ? output.stderr : "";
+                const isWindowsCmdError = /is not recognized as an internal or external command/i.test(
+                  `${typeof plannedStderr === "string" ? plannedStderr : ""}\n${typeof outputStderr === "string" ? outputStderr : ""}`,
+                );
                 const failureHint = report?.status === "denied"
                   ? "Check that the path is inside an approved folder and that the requested operation is allowed."
+                  : isWindowsCmdError
+                    ? "This machine uses Windows CMD. Try Windows commands like 'dir' instead of 'ls', or 'type' instead of 'cat'."
                   : /HTTP 403|returned HTTP 403/i.test(report?.message ?? "")
                     ? "Some websites block automated requests. Try a public page such as https://example.com."
                     : "Check that the file or folder exists and is approved. If local planning failed, try the Heuristic planner.";

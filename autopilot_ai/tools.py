@@ -6,6 +6,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+import sys
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
@@ -17,6 +18,22 @@ from .desktop import DesktopActionPolicyError, DesktopToolError, desktop_action,
 from .filename_matching import matches_filename
 from .policy import PathPolicy, command_risk
 from .web_search import SearchWebArgs, WebSearchError, search_web
+
+
+_WINDOWS_CMD_ALIASES: dict[str, str] = {
+    "ls -la": "dir /a",
+    "ls -l": "dir",
+    "ls -a": "dir /a",
+    "ls": "dir",
+    "cat": "type",
+    "clear": "cls",
+    "rm": "del",
+    "cp": "copy",
+    "mv": "move",
+    "mkdir": "md",
+    "pwd": "cd",
+    "echo": "echo",
+}
 
 
 class ListDirectoryArgs(BaseModel):
@@ -177,6 +194,13 @@ class ReadFileContentsArgs(BaseModel):
     page_number: int | None = Field(default=None, ge=1)
 
 
+class OpenPdfArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=300)
+    root_index: int = Field(default=0, ge=0)
+
+
 _TEXT_FILE_SUFFIXES = frozenset({
     ".txt", ".log", ".md", ".markdown", ".rst", ".json", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".ini", ".cfg",
     ".py", ".pyi", ".js", ".ts", ".tsx", ".jsx", ".html", ".htm", ".css", ".xml", ".sql", ".sh",
@@ -324,6 +348,12 @@ def _run_command(
     root_index: int,
 ) -> dict[str, Any]:
     command_risk(command)
+    if sys.platform == "win32":
+        command_stripped = command.strip().lower()
+        for unix_command, windows_command in _WINDOWS_CMD_ALIASES.items():
+            if command_stripped == unix_command or command_stripped.startswith(unix_command + " "):
+                command = windows_command + command[len(unix_command):]
+                break
     cwd = policy.resolve(working_dir, root_index)
     try:
         proc = subprocess.run(
@@ -454,6 +484,23 @@ def _read_file_contents(
         "total_characters": len(content),
         "truncated": len(content) > max_characters,
     }
+
+
+def _open_pdf(policy: PathPolicy, path: str, root_index: int) -> dict[str, Any]:
+    """Ask Windows to open an approved PDF with its registered viewer."""
+    file_path = policy.resolve_path(path, root_index)
+    if not file_path.is_file() or file_path.is_symlink():
+        raise ToolError("The requested PDF must be an existing regular file.")
+    if file_path.suffix.casefold() != ".pdf":
+        raise ToolError("Only PDF files can be opened with the PDF viewer tool.")
+    start_file = getattr(os, "startfile", None)
+    if start_file is None:
+        raise ToolError("Opening a PDF in its desktop viewer is supported on Windows only.")
+    try:
+        start_file(str(file_path), "open")
+    except OSError as exc:
+        raise ToolExecutionError(f"Windows could not open the PDF with its registered viewer: {exc}") from exc
+    return {"path": str(file_path), "open_request_sent": True, "method": "Windows file association"}
 
 
 def _desktop_action_tool(
@@ -599,6 +646,7 @@ class ToolRegistry:
             "run_command": (RunCommandArgs, _run_command),
             "launch_app": (LaunchAppArgs, _launch_app),
             "read_file_contents": (ReadFileContentsArgs, _read_file_contents),
+            "open_pdf": (OpenPdfArgs, _open_pdf),
         }
 
     @property

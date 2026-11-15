@@ -242,6 +242,17 @@ def plan_goal(goal: str) -> PlanStep:
     )
     if open_file_match:
         path = open_file_match.group("path").strip().strip("\"'")
+        path = re.sub(r"\s+file$", "", path, flags=re.IGNORECASE).strip()
+        if Path(path).suffix.casefold() == ".pdf":
+            return PlanStep(
+                step_id="step-1",
+                description="Open an approved PDF in the Windows default PDF viewer.",
+                tool_name="open_pdf",
+                arguments={"path": path, "root_index": 0},
+                expected_result="Windows foreground-window title identifies the requested PDF after the open request.",
+                risk_level="medium",
+                requires_approval=True,
+            )
         if Path(path).suffix.casefold() in _READABLE_FILE_SUFFIXES:
             return PlanStep(
                 step_id="step-1",
@@ -499,11 +510,11 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
     """Ask the local model for a short plan; validate it but never execute it here."""
     system = (
         "You are a constrained planner. Return a JSON object matching the schema with an ordered steps array of 1 to 3 steps. "
-        "Only use list_directory, search_files, search_web, read_file_contents, write_file, open_webpage, inspect_active_window, desktop_action, run_command, and launch_app. search_web uses the DDGS metasearch package and returns ranked public titles, snippets, and links; open_webpage reads visible text from a public HTTP or HTTPS page. "
+        "Only use list_directory, search_files, search_web, read_file_contents, open_pdf, write_file, open_webpage, inspect_active_window, desktop_action, run_command, and launch_app. search_web uses the DDGS metasearch package and returns ranked public titles, snippets, and links; open_webpage reads visible text from a public HTTP or HTTPS page. "
         "inspect_active_window only reads visible controls from the current Windows window, with an optional screenshot fallback. "
         "desktop_action performs exactly one explicit click, double_click, right_click, type_text, press_key, or hotkey request; it always requires medium risk and user approval. "
         "list_directory lists immediate entries in the primary approved workspace. "
-        "search_files searches filenames across explicitly approved roots; never search contents. read_file_contents reads one existing relative text, code, data, Markdown, or PDF file from an approved root, with path and optional page_number for PDFs. write_file creates or updates one text file in an approved root using path, content, mode='create_new'|'overwrite'|'append', and root_index; it always has medium risk and requires approval. Use relative path '.'. run_command runs a shell command only in an approved relative working_dir; destructive commands are forbidden and non-inspection commands require approval. launch_app starts one installed Windows application with an optional arguments list and always requires approval. "
+        "search_files searches filenames across explicitly approved roots; never search contents. read_file_contents reads one existing relative text, code, data, Markdown, or PDF file from an approved root, with path and optional page_number for PDFs. open_pdf opens an approved existing PDF using the Windows default PDF viewer and always requires approval. write_file creates or updates one text file in an approved root using path, content, mode='create_new'|'overwrite'|'append', and root_index; it always has medium risk and requires approval. Use relative path '.'. run_command runs a shell command only in an approved relative working_dir; destructive commands are forbidden and non-inspection commands require approval. launch_app starts one installed Windows application with an optional arguments list and always requires approval. "
         "For exact filename search use query equal to the filename and match_mode='exact'; for a requested partial name use "
         "match_mode='contains'. For file-type search, use query='' and the exact extensions list requested by the user; "
         "when the user names a folder, use that folder as path and root_index=0 (the primary approved workspace), after deterministic parsing; "
@@ -529,6 +540,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
         "desktop_action": ("Perform one approved desktop mouse or keyboard action.", "A fresh screen, cursor, and foreground-window check confirms the desktop action postconditions."),
         "run_command": ("Run a terminal command in the approved working directory.", "The command exits successfully and its process result is independently checked."),
         "launch_app": ("Launch an installed Windows application.", "Windows reports the launched process as active."),
+        "open_pdf": ("Open an approved PDF in the Windows default PDF viewer.", "Windows foreground-window title identifies the requested PDF after the open request."),
         "read_file_contents": ("Read the contents of an approved file.", "A fresh disk read matches the returned content and file digest."),
         "write_file": ("Write file contents inside the primary approved workspace.", "The requested file contents are present on disk and match a fresh SHA-256 check."),
     }
@@ -538,7 +550,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
             raise PlanningError(step.description)
         if step.tool_name not in available_tools or step.tool_name not in metadata:
             raise ModelPlannerError(f"The model selected an unavailable or disallowed tool: {step.tool_name}")
-        if step.tool_name not in {"run_command", "launch_app", "write_file", "desktop_action"} and (step.risk_level != "low" or step.requires_approval):
+        if step.tool_name not in {"run_command", "launch_app", "write_file", "desktop_action", "open_pdf"} and (step.risk_level != "low" or step.requires_approval):
             raise ModelPlannerError("The model proposed an action outside the read-only planner policy.")
         if step.tool_name == "run_command":
             command = step.arguments.get("command")
@@ -553,6 +565,8 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
         elif step.tool_name == "write_file":
             risk_level, requires_approval = "medium", True
         elif step.tool_name == "desktop_action":
+            risk_level, requires_approval = "medium", True
+        elif step.tool_name == "open_pdf":
             risk_level, requires_approval = "medium", True
         else:
             risk_level, requires_approval = "low", False
