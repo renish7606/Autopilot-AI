@@ -364,6 +364,26 @@ def plan_goal(goal: str) -> PlanStep:
             risk_level="low",
             requires_approval=False,
         )
+    semantic_match = re.fullmatch(
+        r"(?:please\s+)?(?:find|search(?:\s+for)?|look\s+for|locate)\s+"
+        r"(?:files?|documents?|notes?)\s+"
+        r"(?:about|regarding|related\s+to|mentioning|containing\s+(?:info(?:rmation)?\s+(?:about|on)|content\s+about)|with\s+content\s+about|on\s+the\s+topic\s+of)\s+"
+        r"(?P<query>.+)",
+        goal.strip(),
+        flags=re.IGNORECASE,
+    )
+    if semantic_match:
+        query = semantic_match.group("query").strip().strip("\"'.,!?")
+        if query:
+            return PlanStep(
+                step_id="step-1",
+                description="Semantically search approved file contents for the requested topic.",
+                tool_name="semantic_search",
+                arguments={"query": query, "n_results": 5, "min_score": 0.30},
+                expected_result="Ranked approved-file matches include relevant text snippets.",
+                risk_level="low",
+                requires_approval=False,
+            )
     raw_filename = goal.strip().strip(" \t\r\n\"'")
     basename = re.split(r"[\\/]", raw_filename)[-1]
     filename_with_extension = bool(re.fullmatch(r"[^<>:\"|?*]+\.[A-Za-z0-9]{1,16}", basename))
@@ -510,7 +530,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
     """Ask the local model for a short plan; validate it but never execute it here."""
     system = (
         "You are a constrained planner. Return a JSON object matching the schema with an ordered steps array of 1 to 3 steps. "
-        "Only use list_directory, search_files, search_web, read_file_contents, open_pdf, write_file, open_webpage, inspect_active_window, desktop_action, run_command, and launch_app. search_web uses the DDGS metasearch package and returns ranked public titles, snippets, and links; open_webpage reads visible text from a public HTTP or HTTPS page. "
+        "Only use list_directory, search_files, semantic_search, search_web, read_file_contents, open_pdf, write_file, open_webpage, inspect_active_window, desktop_action, run_command, and launch_app. semantic_search finds relevant content in files already indexed from the approved directories and returns file paths and snippets. Use semantic_search only for requests about document content or topics; use search_files for filename searches. search_web uses the DDGS metasearch package and returns ranked public titles, snippets, and links; open_webpage reads visible text from a public HTTP or HTTPS page. "
         "inspect_active_window only reads visible controls from the current Windows window, with an optional screenshot fallback. "
         "desktop_action performs exactly one explicit click, double_click, right_click, type_text, press_key, or hotkey request; it always requires medium risk and user approval. "
         "list_directory lists immediate entries in the primary approved workspace. "
@@ -534,6 +554,7 @@ def plan_with_ollama_steps(goal: str, available_tools: tuple[str, ...], timeout_
     metadata = {
         "list_directory": ("List entries in the approved workspace.", "A fresh workspace scan matches the tool's returned entry names."),
         "search_files": ("Search filenames under the approved workspace.", "An independent filename scan matches the returned search results."),
+        "semantic_search": ("Semantically search approved file contents.", "Returned snippets match fresh approved-file content and result paths remain inside approved roots."),
         "open_webpage": ("Open a public web page and read its visible text.", "A fresh browser page load returns an HTTP response and visible page content."),
         "search_web": ("Search the public web through DDGS metasearch.", "The structured results contain the requested query, ranked titles, snippets, and valid public links."),
         "inspect_active_window": ("Inspect the active desktop window using Windows UI Automation.", "A fresh UI Automation read or a saved screenshot confirms the active window state."),

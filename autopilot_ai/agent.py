@@ -11,7 +11,7 @@ from .planner import ClarificationRequired, ModelPlannerError, PlanningError, pl
 from .policy import PathPolicy, PolicyError, command_risk
 from .recovery import MAX_ATTEMPTS, should_retry
 from .tools import ToolArgumentsError, ToolRegistry
-from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_web_search, verify_desktop_action, verify_desktop_inspection, verify_written_file, verify_pdf_open
+from .verifier import verify_app_launch, verify_command_execution, verify_copied_file, verify_created_directory, verify_directory_listing, verify_file_contents, verify_file_search, verify_webpage_open, verify_web_search, verify_desktop_action, verify_desktop_inspection, verify_written_file, verify_pdf_open, verify_semantic_search
 
 
 class AmbiguousSearchScope(ValueError):
@@ -400,6 +400,8 @@ def run_goal(
                     step.arguments.get("max_results", 100),
                     step.arguments.get("extensions", []),
                 )
+            elif step.tool_name == "semantic_search":
+                verification = verify_semantic_search(result, step.arguments["query"], policy.approved_roots)
             elif step.tool_name == "run_command":
                 verification = verify_command_execution(result)
             elif step.tool_name == "launch_app":

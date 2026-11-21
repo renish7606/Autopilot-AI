@@ -67,6 +67,22 @@ class SearchFilesArgs(BaseModel):
         return normalized
 
 
+class SemanticSearchArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    query: str = Field(min_length=1, max_length=500)
+    n_results: int = Field(default=5, ge=1, le=20)
+    min_score: float = Field(default=0.30, ge=0.0, le=1.0)
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Semantic search query cannot be blank.")
+        return normalized
+
+
 class CreateDirectoryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -628,6 +644,26 @@ def _search_files(
     }
 
 
+def _semantic_search(
+    policy: PathPolicy,
+    query: str,
+    n_results: int,
+    min_score: float,
+) -> dict[str, Any]:
+    """Search indexed file contents while restricting results to approved roots."""
+    try:
+        from .rag.searcher import semantic_search
+
+        return semantic_search(
+            query,
+            n_results=n_results,
+            min_score=min_score,
+            approved_roots=policy.approved_roots,
+        )
+    except (ImportError, RuntimeError) as exc:
+        raise ToolExecutionError(f"Semantic search could not run: {exc}") from exc
+
+
 class ToolRegistry:
     """Allowlisted tool dispatch; callers cannot supply executable code."""
 
@@ -636,6 +672,7 @@ class ToolRegistry:
         self._tools: dict[str, tuple[type[BaseModel], Callable[..., dict[str, Any]]]] = {
             "list_directory": (ListDirectoryArgs, _list_directory),
             "search_files": (SearchFilesArgs, _search_files),
+            "semantic_search": (SemanticSearchArgs, _semantic_search),
             "create_directory": (CreateDirectoryArgs, _create_directory),
             "copy_file": (CopyFileArgs, _copy_file),
             "write_file": (WriteFileArgs, _write_file),

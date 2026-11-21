@@ -19,6 +19,8 @@ export default function Sidebar({ activeSessionId, onNewSession, onSelectSession
   const [directories, setDirectories] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loadingSession, setLoadingSession] = useState<string | null>(null);
+  const [indexing, setIndexing] = useState(false);
+  const [indexResult, setIndexResult] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -46,6 +48,22 @@ export default function Sidebar({ activeSessionId, onNewSession, onSelectSession
       setError(cause instanceof Error ? cause.message : "Could not load session history.");
     } finally {
       setLoadingSession(null);
+    }
+  };
+
+  const handleIndex = async () => {
+    setIndexing(true);
+    setIndexResult(null);
+    try {
+      const response = await fetch("/api/rag/index", { method: "POST", headers: { Accept: "application/json" } });
+      const data = await response.json() as { indexed_files?: number; skipped_files?: number; total_chunks?: number; error_count?: number; detail?: string };
+      if (!response.ok) throw new Error(data.detail || `Index request failed (${response.status}).`);
+      const summary = `Indexed ${data.indexed_files ?? 0} files (${data.total_chunks ?? 0} chunks); skipped ${data.skipped_files ?? 0}.`;
+      setIndexResult(data.error_count ? `${summary} ${data.error_count} issue(s); check server response.` : summary);
+    } catch (cause) {
+      setIndexResult(cause instanceof Error ? cause.message : "Indexing failed. Check that the server and Ollama are running.");
+    } finally {
+      setIndexing(false);
     }
   };
 
@@ -84,6 +102,17 @@ export default function Sidebar({ activeSessionId, onNewSession, onSelectSession
             {directories.map((directory) => <li key={directory} className="truncate rounded px-2 py-1 font-mono text-[11px] text-zinc-500" title={directory}>{directory}</li>)}
           </ul>
         </div>
+      </div>
+      <div className="border-t border-zinc-800 p-3">
+        <button
+          type="button"
+          onClick={() => void handleIndex()}
+          disabled={indexing}
+          className="w-full rounded border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-400 hover:border-zinc-600 hover:text-white disabled:opacity-50"
+        >
+          {indexing ? "Indexing approved files..." : "Index Workspace (RAG)"}
+        </button>
+        {indexResult && <p role="status" className="mt-2 break-words text-[10px] text-zinc-500">{indexResult}</p>}
       </div>
     </aside>
   );

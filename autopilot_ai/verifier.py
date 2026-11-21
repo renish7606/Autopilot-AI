@@ -6,6 +6,7 @@ import csv
 from io import StringIO
 import os
 import hashlib
+import math
 import subprocess
 import time
 
@@ -355,6 +356,127 @@ def verify_written_file(result: ToolResult, destination: Path, content: str, mod
         passed=passed,
         summary="Written file independently verified by disk read and SHA-256." if passed else "Written file content or digest differs from the requested result.",
         evidence={"path": str(destination), "size_bytes": size_bytes, "sha256": digest_text, "content_matches": content_matches, "tool_output_matches": output_matches},
+    )
+
+
+def verify_semantic_search(
+    result: ToolResult,
+    query: str,
+    approved_roots: tuple[Path, ...] | list[Path],
+) -> Verification:
+    """Check search structure and confirm returned snippets still exist in approved files."""
+    if result.status != "success":
+        return Verification(
+            passed=False,
+            summary=f"Semantic search failed: {result.error_code or 'unknown error'}.",
+            evidence={"status": result.status, "error_code": result.error_code},
+        )
+
+    output = result.output
+    rows = output.get("results")
+    total_chunks = output.get("total_indexed_chunks")
+    if (
+        output.get("query") != query.strip()
+        or not isinstance(rows, list)
+        or not isinstance(total_chunks, int)
+        or isinstance(total_chunks, bool)
+        or total_chunks < 0
+        or len(rows) > 20
+    ):
+        return Verification(passed=False, summary="Semantic search returned malformed or inconsistent output.")
+
+    roots: list[Path] = []
+    try:
+        roots = [Path(root).resolve(strict=True) for root in approved_roots]
+    except (OSError, RuntimeError) as exc:
+        return Verification(passed=False, summary="Approved search roots could not be rechecked.", evidence={"error": str(exc)})
+
+    note = output.get("note")
+    if not rows:
+        if note is not None and not isinstance(note, str):
+            return Verification(passed=False, summary="Semantic search returned an invalid empty-result note.")
+        return Verification(
+            passed=True,
+            summary=note or "Semantic search completed with no matching files.",
+            evidence={"query": query, "result_count": 0, "total_indexed_chunks": total_chunks},
+        )
+
+    try:
+        from .rag.indexer import _extract_text
+    except ImportError as exc:
+        return Verification(passed=False, summary="Could not load the file reader for semantic-search verification.", evidence={"error": str(exc)})
+
+    seen_paths: set[str] = set()
+    previous_score = math.inf
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            return Verification(passed=False, summary="Semantic search returned a malformed file result.", evidence={"invalid_rank": index})
+        path_value = row.get("file_path")
+        file_name = row.get("file_name")
+        snippet = row.get("top_snippet")
+        score = row.get("best_score")
+        if (
+            not isinstance(path_value, str)
+            or not isinstance(file_name, str)
+            or not isinstance(snippet, str)
+            or not snippet
+            or not isinstance(score, (int, float))
+            or isinstance(score, bool)
+            or not math.isfinite(score)
+            or not -1.0 <= score <= 1.0
+            or score > previous_score
+        ):
+            return Verification(passed=False, summary="Semantic search returned an invalid or unsorted match.", evidence={"invalid_rank": index})
+        previous_score = float(score)
+        candidate = Path(path_value)
+        try:
+            if candidate.is_symlink():
+                raise ValueError("The matched file is a symbolic link.")
+            resolved = candidate.resolve(strict=True)
+            relative_roots = []
+            for root in roots:
+                try:
+                    relative_roots.append((root, resolved.relative_to(root)))
+                except ValueError:
+                    continue
+            if not resolved.is_file() or not relative_roots:
+                raise ValueError("The matched file is missing or outside approved directories.")
+            root, relative = relative_roots[0]
+            cursor = root
+            for component in relative.parts:
+                cursor = cursor / component
+                if cursor.is_symlink():
+                    raise ValueError("The matched path contains a symbolic link.")
+        except (OSError, RuntimeError, ValueError) as exc:
+            return Verification(
+                passed=False,
+                summary="A semantic-search match is no longer a regular file under an approved root.",
+                evidence={"path": path_value, "error": str(exc)},
+            )
+        path_key = os.path.normcase(str(resolved))
+        if path_key in seen_paths or file_name != resolved.name:
+            return Verification(passed=False, summary="Semantic-search file paths or names are duplicated or inconsistent.", evidence={"path": path_value})
+        seen_paths.add(path_key)
+        fresh_text = _extract_text(resolved)
+        if fresh_text is None or snippet not in fresh_text:
+            return Verification(
+                passed=False,
+                summary="A returned snippet no longer matches the current contents of its file; re-index the approved folders.",
+                evidence={"path": str(resolved), "snippet_matches_current_file": False},
+            )
+
+    top = rows[0]
+    return Verification(
+        passed=True,
+        summary=f"Verified {len(rows)} semantic match(es) against current content in approved files. Top match: {top['file_name']} (score {top['best_score']:.2f}).",
+        evidence={
+            "query": query,
+            "result_count": len(rows),
+            "top_file": top["file_path"],
+            "top_score": top["best_score"],
+            "approved_paths_checked": len(seen_paths),
+            "snippets_checked": len(seen_paths),
+        },
     )
 
 

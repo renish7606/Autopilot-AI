@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 def matches_filename(name: str, query: str, match_mode: str, extensions: tuple[str, ...] | list[str] = ()) -> bool:
     """Match a basename by exact name, substring, or a requested suffix set."""
     if extensions:

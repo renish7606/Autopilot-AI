@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from autopilot_ai.agent import run_goal
@@ -352,6 +352,30 @@ async def list_approved_directories() -> dict[str, list[str]]:
 async def list_approved_applications() -> dict[str, list[str]]:
     applications = await asyncio.to_thread(load_approved_apps)
     return {"approved_apps": sorted(applications)}
+
+
+@app.post("/api/rag/index")
+async def trigger_rag_indexing() -> dict[str, Any]:
+    """Index the workspace and currently approved directories in a worker thread."""
+    from autopilot_ai.rag.indexer import index_workspace
+
+    try:
+        approved_dirs = await asyncio.to_thread(load_approved_dirs)
+        result = await asyncio.to_thread(index_workspace, DEFAULT_WORKSPACE, list(approved_dirs))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=f"Semantic indexing could not complete: {exc}") from exc
+    return {"status": "ok", **result}
+
+
+@app.get("/api/rag/stats")
+async def rag_index_stats() -> dict[str, Any]:
+    """Return the local semantic-search index size and storage path."""
+    from autopilot_ai.rag.store import collection_stats
+
+    try:
+        return await asyncio.to_thread(collection_stats)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _validate_goal(value: Any) -> str | None:
