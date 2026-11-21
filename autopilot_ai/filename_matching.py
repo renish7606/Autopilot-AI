@@ -9,3 +9,4 @@ def matches_filename(name: str, query: str, match_mode: str, extensions: tuple[s
     folded_name = name.casefold()
     folded_query = query.casefold().strip()
     return folded_name == folded_query if match_mode == "exact" else folded_query in folded_name
+    
