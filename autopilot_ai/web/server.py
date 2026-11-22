@@ -29,7 +29,7 @@ app.add_middleware(
 
 DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2] / "workspace"
 _sessions: dict[str, ConversationSession] = {}
-_pending_approvals: dict[str, dict[str, str]] = {}
+_pending_approvals: dict[str, dict[str, Any]] = {}
 _active_sessions: set[str] = set()
 _memory = TaskMemory()
 _ALLOWED_ORIGINS = frozenset({
@@ -91,8 +91,8 @@ async def _handle_run_goal(ws: WebSocket, message: dict[str, Any]) -> None:
         await _send_event(ws, "error", message="A non-empty goal of at most 2000 characters is required.")
         return
     planner = message.get("planner", "ollama")
-    if planner not in {"ollama", "heuristic"}:
-        await _send_event(ws, "error", message="Planner must be 'ollama' or 'heuristic'.")
+    if planner not in {"ollama", "heuristic", "langgraph"}:
+        await _send_event(ws, "error", message="Planner must be 'ollama', 'heuristic', or 'langgraph'.")
         return
     approved = message.get("approved", False)
     if not isinstance(approved, bool):
@@ -144,7 +144,10 @@ async def _handle_approval(ws: WebSocket, message: dict[str, Any]) -> None:
 
     _active_sessions.add(session_id)
     try:
-        await _run_and_report(ws, session, goal, workspace, pending["planner"], approved=True)
+        await _run_and_report(
+            ws, session, goal, workspace, pending["planner"], approved=True,
+            approved_action=pending.get("plan") if pending["planner"] == "langgraph" else None,
+        )
     finally:
         _active_sessions.discard(session_id)
 
@@ -156,6 +159,7 @@ async def _run_and_report(
     workspace: Path,
     planner: str,
     approved: bool,
+    approved_action: dict[str, Any] | None = None,
 ) -> None:
     session_id = session.session_id
     await _send_event(ws, "task_started", goal=goal, session_id=session_id)
@@ -194,6 +198,10 @@ async def _run_and_report(
         approved_dirs = load_approved_dirs()
 
         def run_task(task_goal: str) -> dict[str, Any]:
+            if planner == "langgraph":
+                from autopilot_ai.langgraph_agent.runner import run_langgraph_goal
+
+                return run_langgraph_goal(task_goal, workspace, approved=approved, approved_action=approved_action)
             return run_goal(
                 task_goal,
                 workspace,
@@ -215,6 +223,7 @@ async def _run_and_report(
             "goal": goal,
             "workspace": str(workspace),
             "planner": planner,
+            "plan": report.get("plan"),
         }
         await _send_event(
             ws,

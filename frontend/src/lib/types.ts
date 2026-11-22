@@ -82,7 +82,11 @@ export interface HistoryEntry {
   output: unknown;
 }
 
-export interface RunOptions {
-  planner?: "ollama" | "heuristic";
+export type PlannerMode = "ollama" | "heuristic" | "langgraph";
+
+// The generic default preserves the legacy callback contract used by Layout;
+// new planner-capable components can opt into RunOptions<PlannerMode>.
+export interface RunOptions<P extends PlannerMode = "ollama" | "heuristic"> {
+  planner?: P;
   workspace?: string;
 }
